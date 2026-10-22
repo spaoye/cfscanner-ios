@@ -600,8 +600,10 @@ final class Scanner: ObservableObject {
 
     // MARK: 结果上传（总开关关闭时以下方法不会被调用）
 
-    /// 把本轮结果按 exe 3.0 协议上传到中转：只传达标（≥ 门槛）的前 10 名。
-    func uploadResults() async {
+    /// 把本轮结果按 exe 3.0 协议上传到中转。
+    /// 自动上传（manual=false）：只传达标（≥ 门槛）的前 10 名。
+    /// 手动上传（manual=true）：不限门槛，传速度最快的前 5 名——没达到上传要求时也能手动传。
+    func uploadResults(manual: Bool = false) async {
         guard uploadEnabled else { return }
         guard !isUploading else { return }
         let token = uploadToken.trimmingCharacters(in: .whitespaces)
@@ -614,15 +616,24 @@ final class Scanner: ObservableObject {
             uploadStatus = "上传失败：地区不能为空（要和面板里 broker 地区一致）"
             return
         }
-        // 候选：有下载成绩、达到门槛、按速度降序，最多 10 条
-        let minSpeed = uploadMinSpeed
-        let eligible = results
-            .filter { ($0.downloadMBps ?? 0) >= max(minSpeed, 0.01) }
+        // 候选：有下载成绩的按速度降序；自动上传要过门槛取前 10，手动上传不限门槛取前 5
+        let bySpeed = results
+            .filter { ($0.downloadMBps ?? 0) > 0 }
             .sorted { ($0.downloadMBps ?? 0) > ($1.downloadMBps ?? 0) }
-        let items = Array(eligible.prefix(10))
-        guard !items.isEmpty else {
-            uploadStatus = "没有达到 \(Int(minSpeed)) MB/s 门槛的结果，未上传（共 \(results.count) 条结果）"
-            return
+        let items: [ScanResult]
+        if manual {
+            items = Array(bySpeed.prefix(5))
+            guard !items.isEmpty else {
+                uploadStatus = "没有带下载速度的结果可上传（先跑完一轮下载测速）"
+                return
+            }
+        } else {
+            let minSpeed = uploadMinSpeed
+            items = Array(bySpeed.filter { ($0.downloadMBps ?? 0) >= max(minSpeed, 0.01) }.prefix(10))
+            guard !items.isEmpty else {
+                uploadStatus = "没有达到 \(Int(minSpeed)) MB/s 门槛的结果，未上传（共 \(results.count) 条结果）"
+                return
+            }
         }
         // 运营商：优先用本轮测速定下的，其次参数里的手动选择，最后现场识别一次
         var carrier = lastCarrier ?? Carrier(rawValue: carrierChoice)
@@ -681,7 +692,9 @@ final class Scanner: ObservableObject {
         ]
 
         setUploading(true)
-        uploadStatus = "正在上传 \(items.count) 条（\(regionText) / \(isp.shortLabel)）…"
+        uploadStatus = manual
+            ? "正在手动上传 \(items.count) 条（速度前 \(items.count)，不限门槛 / \(regionText) / \(isp.shortLabel)）…"
+            : "正在上传 \(items.count) 条（\(regionText) / \(isp.shortLabel)）…"
         let outcome = await Uploader.upload(
             apiURL: uploadAPIURL.trimmingCharacters(in: .whitespaces),
             token: token,

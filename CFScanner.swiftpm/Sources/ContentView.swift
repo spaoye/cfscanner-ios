@@ -72,14 +72,14 @@ struct ContentView: View {
                     }
                     if scanner.uploadEnabled && !scanner.results.isEmpty {
                         Button {
-                            Task { await scanner.uploadResults() }
+                            Task { await scanner.uploadResults(manual: true) }
                         } label: {
                             HStack {
                                 Spacer()
                                 if scanner.isUploading {
                                     ProgressView()
                                 } else {
-                                    Text("上传结果到中转")
+                                    Text("手动上传速度前 5（不限门槛）")
                                 }
                                 Spacer()
                             }
@@ -220,7 +220,7 @@ struct ContentView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Text("开启后，测速结果里达标的前 10 名（IP、速度、延迟、丢包、落点）会按地区 + 运营商上传到中转，供 Emby 面板的自动优选拉取使用。地区要和面板里 broker 的地区填一致；运营商用测速时识别/选择的那家。令牌与电脑端工具里填的是同一个，只保存在本机。")
+                        Text("开启后，测速结果里达标的前 10 名（IP、速度、延迟、丢包、落点）会按地区 + 运营商上传到中转，供 Emby 面板的自动优选拉取使用。地区要和面板里 broker 的地区填一致；运营商用测速时识别/选择的那家。令牌与电脑端工具里填的是同一个，只保存在本机。自动上传按上面的门槛筛前 10 名；结果区的手动上传不限门槛，传速度最快的前 5 名。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
