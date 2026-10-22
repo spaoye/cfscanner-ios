@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// 目标地区：按连接实测的落点（机房/国家）过滤，不是按 IP 归属——
 /// CF 是 anycast，同一个 IP 在不同网络、不同时间可能落到不同机房，只能现测现筛。
@@ -255,8 +256,23 @@ final class Scanner: ObservableObject {
         statusText = "正在停止…"
     }
 
+    // MARK: 屏幕常亮（测速/上传期间不黑屏，结束或停止后恢复系统自动锁屏）
+    private func setRunning(_ value: Bool) {
+        isRunning = value
+        updateIdleTimer()
+    }
+
+    private func setUploading(_ value: Bool) {
+        isUploading = value
+        updateIdleTimer()
+    }
+
+    private func updateIdleTimer() {
+        UIApplication.shared.isIdleTimerDisabled = isRunning || isUploading
+    }
+
     private func run() async {
-        isRunning = true
+        setRunning(true)
         cancelled = false
         results = []
         progress = 0
@@ -304,7 +320,7 @@ final class Scanner: ObservableObject {
         }
         guard !candidates.isEmpty else {
             statusText = "候选 IP 生成失败"
-            isRunning = false
+            setRunning(false)
             return
         }
 
@@ -359,13 +375,13 @@ final class Scanner: ObservableObject {
         if cancelled {
             statusText = "已停止。延迟阶段完成 \(doneCount)/\(candidates.count)，可用 \(filtered.count) 个"
             results = filtered
-            isRunning = false
+            setRunning(false)
             return
         }
         guard !filtered.isEmpty else {
             statusText = "没有符合条件的 IP（延迟 ≤ \(Int(latencyLimit))ms、丢包 ≤ \(Int(lossLimitPct))%）。可以放宽上限再试。"
             results = []
-            isRunning = false
+            setRunning(false)
             return
         }
 
@@ -462,7 +478,7 @@ final class Scanner: ObservableObject {
                 statusText = "已停止。地区筛选（\(label)）命中 \(matched.count) 个"
                 results = matched
                 progress = 1
-                isRunning = false
+                setRunning(false)
                 return
             }
             // 运营商模式兜底：优先机房零命中时改按实际主落点筛
@@ -480,7 +496,7 @@ final class Scanner: ObservableObject {
                 statusText = "探测了 \(probed.count) 个低延迟 IP，没有实际落到\(regionPref.label)的（它们的真实落点见列表中的地区码）。可以换个地区，或选不限。"
                 results = filtered.filter { probed.contains($0.ip) }
                 progress = 1
-                isRunning = false
+                setRunning(false)
                 return
             } else {
                 filtered = matched
@@ -544,7 +560,7 @@ final class Scanner: ObservableObject {
 
         results = filtered
         progress = 1
-        isRunning = false
+        setRunning(false)
         lastFinishedAt = Date()
 
         // 测完自动上传：仅当总开关与自动上传都开、且本轮没被手动停止时
@@ -664,14 +680,14 @@ final class Scanner: ObservableObject {
             "items": bodyItems
         ]
 
-        isUploading = true
+        setUploading(true)
         uploadStatus = "正在上传 \(items.count) 条（\(regionText) / \(isp.shortLabel)）…"
         let outcome = await Uploader.upload(
             apiURL: uploadAPIURL.trimmingCharacters(in: .whitespaces),
             token: token,
             body: body
         )
-        isUploading = false
+        setUploading(false)
         switch outcome {
         case .success(let saved):
             uploadStatus = saved >= 0
@@ -690,13 +706,13 @@ final class Scanner: ObservableObject {
             return
         }
         guard !isUploading else { return }
-        isUploading = true
+        setUploading(true)
         uploadStatus = "正在验证令牌…"
         let outcome = await Uploader.verifyToken(
             apiURL: uploadAPIURL.trimmingCharacters(in: .whitespaces),
             token: token
         )
-        isUploading = false
+        setUploading(false)
         switch outcome {
         case .success(let name):
             uploadStatus = name.isEmpty ? "令牌验证通过" : "令牌验证通过：\(name)"
