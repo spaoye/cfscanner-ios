@@ -168,9 +168,17 @@ struct ContentView: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .font(.system(.footnote, design: .monospaced))
-                        SecureField("上传令牌", text: $scanner.uploadToken)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                        HStack {
+                            TextField("上传令牌", text: $scanner.uploadToken)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                            Button("粘贴") {
+                                if let s = UIPasteboard.general.string {
+                                    scanner.uploadToken = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                                }
+                            }
+                            .font(.callout)
+                        }
                         HStack {
                             Text("地区")
                             Spacer()
