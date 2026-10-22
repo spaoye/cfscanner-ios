@@ -6,6 +6,7 @@ struct ContentView: View {
     @StateObject private var scanner = Scanner()
     @State private var copiedIP: String?
     @State private var showImporter = false
+    @State private var paramsExpanded = false
     @State private var importNote: String?
     @State private var showImportEditor = false
     @State private var importText = ""
@@ -136,7 +137,8 @@ struct ContentView: View {
                     }
                 }
 
-                Section("参数") {
+                Section {
+                    DisclosureGroup("参数", isExpanded: $paramsExpanded) {
                     Picker("目标地区", selection: $scanner.region) {
                         ForEach(RegionPreference.allCases) { r in
                             Text(r.label).tag(r)
@@ -178,6 +180,7 @@ struct ContentView: View {
                         settingRow("单个下载时长", value: "\(Int(scanner.downloadSeconds)) 秒") {
                             Slider(value: $scanner.downloadSeconds, in: 3...15, step: 1)
                         }
+                    }
                     }
                 }
 
@@ -252,52 +255,14 @@ struct ContentView: View {
                 Text(copiedIP ?? "")
             }
         }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.plainText, .commaSeparatedText, .text, .data], allowsMultipleSelection: false) { result in
-            switch result {
-            case .failure(let err):
-                importNote = "文件选择失败：\(err.localizedDescription)"
-            case .success(let urls):
-                guard let url = urls.first else { return }
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                guard let data = try? Data(contentsOf: url), !data.isEmpty else {
-                    importNote = "读不到这个文件的内容（可能还在 iCloud 里没下载完）。先在「文件」App 里点它一下下载到本机，再回来导入；或者用粘贴导入。"
-                    return
-                }
-                if let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) ?? String(data: data, encoding: .isoLatin1) {
-                    scanner.importCustomList(text: text, name: url.lastPathComponent)
-                    importNote = scanner.statusText
-                } else {
-                    importNote = "这个文件不是文本内容，无法导入。请选择一行一个 IP 的 .txt 或 .csv 文件，或用粘贴导入。"
-                }
-            }
-        }
-        .sheet(isPresented: $showImportEditor) {
-            NavigationStack {
-                TextEditor(text: $importText)
-                    .font(.system(.footnote, design: .monospaced))
-                    .padding(8)
-                    .navigationTitle("输入 IP 列表")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("取消") { showImportEditor = false }
-                        }
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("导入") {
-                                scanner.importCustomList(text: importText, name: "手动输入.txt")
-                                importNote = scanner.statusText
-                                showImportEditor = false
-                            }
-                            .disabled(importText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-                        ToolbarItem(placement: .bottomBar) {
-                            Button("从剪贴板填入") {
-                                if let s = UIPasteboard.general.string { importText = s }
-                            }
-                        }
-                    }
-            }
+        .sheet(isPresented: $showImporter) {
+            DocumentPicker(onPick: { url in
+                showImporter = false
+                handlePickedFile(url)
+            }, onCancel: {
+                showImporter = false
+            })
+            .ignoresSafeArea()
         }
         .alert("导入结果", isPresented: Binding(
             get: { importNote != nil },
@@ -306,6 +271,26 @@ struct ContentView: View {
             Button("好") { importNote = nil }
         } message: {
             Text(importNote ?? "")
+        }
+    }
+
+    /// 处理文件选择器（asCopy 模式）交回的本地文件副本：限大小、解码、导入，全程给反馈
+    private func handlePickedFile(_ url: URL) {
+        let name = url.lastPathComponent
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        if fileSize > 20 * 1024 * 1024 {
+            importNote = "「\(name)」有 \(fileSize / 1024 / 1024) MB，太大了。IP 列表应该是几十 KB 的文本文件，是不是选错文件了？"
+            return
+        }
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            importNote = "读不到「\(name)」的内容，请换个位置存放（比如先存到「我的 iPhone」）再导入，或用粘贴/手动输入。"
+            return
+        }
+        if let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) ?? String(data: data, encoding: .isoLatin1) {
+            scanner.importCustomList(text: text, name: name)
+            importNote = scanner.statusText
+        } else {
+            importNote = "「\(name)」不是文本内容，无法导入。请选择一行一个 IP 的 .txt 或 .csv 文件。"
         }
     }
 
