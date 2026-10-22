@@ -7,6 +7,8 @@ struct ContentView: View {
     @State private var copiedIP: String?
     @State private var showImporter = false
     @State private var importNote: String?
+    @State private var showImportEditor = false
+    @State private var importText = ""
 
     var body: some View {
         NavigationStack {
@@ -110,26 +112,18 @@ struct ContentView: View {
                         }
                         Button("重新导入") { showImporter = true }
 
-                        Button("粘贴导入（从剪贴板）") {
-                            if let clip = UIPasteboard.general.string,
-                               !clip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                scanner.importCustomList(text: clip, name: "剪贴板导入.txt")
-                                importNote = scanner.statusText
-                            } else {
-                                importNote = "剪贴板里没有文本。先把 IP 列表复制下来（一行一个 IP），再点粘贴导入。"
-                            }
+                        Button("粘贴导入（从剪贴板）") { importFromClipboard() }
+                        Button("手动输入 / 粘贴文本") {
+                            importText = ""
+                            showImportEditor = true
                         }
                     } else {
                         Button("导入 IP 文件（CSV / TXT）") { showImporter = true }
 
-                        Button("粘贴导入（从剪贴板）") {
-                            if let clip = UIPasteboard.general.string,
-                               !clip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                scanner.importCustomList(text: clip, name: "剪贴板导入.txt")
-                                importNote = scanner.statusText
-                            } else {
-                                importNote = "剪贴板里没有文本。先把 IP 列表复制下来（一行一个 IP），再点粘贴导入。"
-                            }
+                        Button("粘贴导入（从剪贴板）") { importFromClipboard() }
+                        Button("手动输入 / 粘贴文本") {
+                            importText = ""
+                            showImportEditor = true
                         }
                         Text("每行一个 IP 或网段（如 104.16.0.0/24），CSV 取第一列；CFST 的 ip.txt 和 result.csv 可直接导入。也支持 https://IP、IP:端口 这类网页导出格式，纯域名的行会跳过。不导入时从 Cloudflare 官方 IP 段随机抽样。")
                             .font(.caption)
@@ -278,6 +272,33 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(isPresented: $showImportEditor) {
+            NavigationStack {
+                TextEditor(text: $importText)
+                    .font(.system(.footnote, design: .monospaced))
+                    .padding(8)
+                    .navigationTitle("输入 IP 列表")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") { showImportEditor = false }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("导入") {
+                                scanner.importCustomList(text: importText, name: "手动输入.txt")
+                                importNote = scanner.statusText
+                                showImportEditor = false
+                            }
+                            .disabled(importText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                        ToolbarItem(placement: .bottomBar) {
+                            Button("从剪贴板填入") {
+                                if let s = UIPasteboard.general.string { importText = s }
+                            }
+                        }
+                    }
+            }
+        }
         .alert("导入结果", isPresented: Binding(
             get: { importNote != nil },
             set: { if !$0 { importNote = nil } }
@@ -286,6 +307,33 @@ struct ContentView: View {
         } message: {
             Text(importNote ?? "")
         }
+    }
+
+    /// 从剪贴板导入：依次尝试纯文本、文件 URL、原始数据（在「文件」里长按文件选「拷贝」也能粘进来）
+    private func importFromClipboard() {
+        let pb = UIPasteboard.general
+        if let s = pb.string, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            scanner.importCustomList(text: s, name: "剪贴板导入.txt")
+            importNote = scanner.statusText
+            return
+        }
+        if let url = pb.url, url.isFileURL {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            if let data = try? Data(contentsOf: url),
+               let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) ?? String(data: data, encoding: .isoLatin1) {
+                scanner.importCustomList(text: text, name: url.lastPathComponent)
+                importNote = scanner.statusText
+                return
+            }
+        }
+        if let data = pb.data(forPasteboardType: UTType.data.identifier),
+           let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) ?? String(data: data, encoding: .isoLatin1) {
+            scanner.importCustomList(text: text, name: "剪贴板导入.txt")
+            importNote = scanner.statusText
+            return
+        }
+        importNote = "剪贴板里没找到可导入的文本或文件。在「文件」App 里长按文件选「拷贝」，或打开文件全选拷贝内容，再回来点粘贴导入；也可以用「手动输入 / 粘贴文本」。"
     }
 
     private func settingRow<Control: View>(_ title: String, value: String, @ViewBuilder control: () -> Control) -> some View {
