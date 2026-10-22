@@ -28,6 +28,35 @@ jobs:
             -derivedDataPath "$GITHUB_WORKSPACE/build/DD" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
 
+      - name: Embed app icon (light + dark)
+        run: |
+          APP=$(find "$GITHUB_WORKSPACE/build/DD/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
+          echo "App: $APP"
+          ICONSET=/tmp/AppIcon.xcassets/AppIcon.appiconset
+          mkdir -p "$ICONSET"
+          cp AppIcon/icon-light.png "$ICONSET/icon-light.png"
+          cp AppIcon/icon-dark.png "$ICONSET/icon-dark.png"
+          cat > "$ICONSET/Contents.json" <<'EOF'
+          {
+            "images": [
+              { "filename": "icon-light.png", "idiom": "iphone", "scale": "1x", "size": "1024x1024" },
+              { "filename": "icon-dark.png", "idiom": "iphone", "scale": "1x", "size": "1024x1024",
+                "appearances": [{ "appearance": "luminosity", "value": "dark" }] },
+              { "filename": "icon-light.png", "idiom": "ipad", "scale": "1x", "size": "1024x1024" },
+              { "filename": "icon-dark.png", "idiom": "ipad", "scale": "1x", "size": "1024x1024",
+                "appearances": [{ "appearance": "luminosity", "value": "dark" }] }
+            ],
+            "info": { "author": "xcode", "version": 1 }
+          }
+          EOF
+          mkdir -p /tmp/icon-out
+          xcrun actool /tmp/AppIcon.xcassets --compile /tmp/icon-out --platform iphoneos --minimum-deployment-target 16.0 --app-icon AppIcon --output-partial-info-plist /tmp/icon-partial.plist
+          ls -lh /tmp/icon-out
+          cp -R /tmp/icon-out/Assets.car "$APP/"
+          cp /tmp/icon-out/AppIcon*.png "$APP/" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Merge /tmp/icon-partial.plist" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$APP/Info.plist"
+
       - name: Package unsigned IPA
         run: |
           APP=$(find "$GITHUB_WORKSPACE/build/DD/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
