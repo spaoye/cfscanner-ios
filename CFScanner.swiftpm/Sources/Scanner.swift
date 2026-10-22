@@ -1,5 +1,55 @@
 import Foundation
 
+/// 目标地区：按连接实测的落点（机房/国家）过滤，不是按 IP 归属——
+/// CF 是 anycast，同一个 IP 在不同网络、不同时间可能落到不同机房，只能现测现筛。
+enum RegionPreference: String, CaseIterable, Identifiable {
+    case any, hongKong, taiwan, singapore, japan, korea, usWest, usEast, europe
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .any: return "不限"
+        case .hongKong: return "香港"
+        case .taiwan: return "台湾"
+        case .singapore: return "新加坡"
+        case .japan: return "日本"
+        case .korea: return "韩国"
+        case .usWest: return "美国西部"
+        case .usEast: return "美国东部"
+        case .europe: return "欧洲"
+        }
+    }
+
+    /// 按国家匹配的地区（用 trace 响应里的 loc 字段）
+    var countries: Set<String>? {
+        switch self {
+        case .hongKong: return ["HK"]
+        case .taiwan: return ["TW"]
+        case .singapore: return ["SG"]
+        case .japan: return ["JP"]
+        case .korea: return ["KR"]
+        case .europe: return ["GB", "DE", "FR", "NL", "ES", "IT", "SE", "CH", "AT", "PL", "BE", "DK", "NO", "FI", "IE", "PT", "CZ"]
+        default: return nil
+        }
+    }
+
+    /// 按机房代码匹配的地区（美国东西部同属一个国家，只能按机房分）
+    var colos: Set<String>? {
+        switch self {
+        case .usWest: return ["LAX", "SJC", "SFO", "SEA", "PDX", "SLC", "DEN", "PHX", "LAS", "SAN"]
+        case .usEast: return ["IAD", "EWR", "JFK", "LGA", "BOS", "ORD", "DFW", "IAH", "ATL", "MIA", "CLT", "DTW", "MSP", "BNA", "STL", "CMH", "IND"]
+        default: return nil
+        }
+    }
+
+    func matches(colo: String?, country: String?) -> Bool {
+        if let colos { return colo.map { colos.contains($0) } ?? false }
+        if let countries { return country.map { countries.contains($0) } ?? false }
+        return true
+    }
+}
+
 struct ScanResult: Identifiable {
     let id = UUID()
     let ip: String
@@ -8,6 +58,7 @@ struct ScanResult: Identifiable {
     var avgLatencyMs: Double
     var downloadMBps: Double?
     var colo: String?
+    var country: String? = nil
     var note: String? = nil
     var lossRate: Double { sent > 0 ? Double(sent - received) / Double(sent) : 1 }
 }
@@ -16,6 +67,10 @@ struct ScanResult: Identifiable {
 final class Scanner: ObservableObject {
 
     // MARK: 设置（界面直接绑定，默认值对齐 CFST）
+    @Published var region: RegionPreference = .any {   // 目标地区（按实测落点过滤）
+        didSet { UserDefaults.standard.set(region.rawValue, forKey: Self.regionKey) }
+    }
+    private static let regionKey = "cfscanner.region"
     @Published var maxLatencyMs: Double = 200      // -tl  平均延迟上限
     @Published var lossLimitPct: Double = 25       // -tlr 丢包率上限（%）
     @Published var attempts: Double = 4            // -t   每个 IP 延迟测速次数
@@ -42,6 +97,10 @@ final class Scanner: ObservableObject {
     private static let customNameKey = "cfscanner.customIPName"
 
     init() {
+        if let raw = UserDefaults.standard.string(forKey: Self.regionKey),
+           let saved = RegionPreference(rawValue: raw) {
+            region = saved
+        }
         if let text = UserDefaults.standard.string(forKey: Self.customTextKey),
            let name = UserDefaults.standard.string(forKey: Self.customNameKey) {
             let ips = IPRanges.parseCustomList(text)
@@ -105,6 +164,8 @@ final class Scanner: ObservableObject {
         let nDownload = Int(downloadCount)
         let dlSeconds = downloadSeconds
         let host = testHost
+        let regionPref = region
+        let latencyShare = regionPref == .any ? (doDownload ? 0.8 : 1.0) : 0.7
 
         let candidates: [String]
         if let custom = customIPs, !custom.isEmpty {
@@ -155,7 +216,7 @@ final class Scanner: ObservableObject {
             }
             tested.append(contentsOf: partial)
             doneCount += chunk.count
-            progress = Double(doneCount) / Double(candidates.count) * (doDownload ? 0.8 : 1.0)
+            progress = Double(doneCount) / Double(candidates.count) * latencyShare
             statusText = "延迟测速中：\(doneCount)/\(candidates.count)，可用 \(tested.count)"
             startIndex += chunkSize
         }
@@ -180,6 +241,66 @@ final class Scanner: ObservableObject {
             return
         }
 
+        // ---------- 地区筛选：从最低延迟开始逐批探测落点，只留目标地区的 ----------
+        if regionPref != .any {
+            let want = doDownload ? max(nDownload, 1) : Int.max
+            var matched: [ScanResult] = []
+            var probed = Set<String>()
+            var idx = 0
+            let batchSize = 20
+            while idx < filtered.count && matched.count < want && probed.count < 200 {
+                if cancelled { break }
+                let batch = Array(filtered[idx..<min(idx + batchSize, filtered.count)])
+                idx += batch.count
+                let infos = await withTaskGroup(of: (String, String?, String?).self) { group in
+                    for r in batch {
+                        group.addTask {
+                            let p = await NetTest.probe(ip: r.ip, testHost: host)
+                            return (r.ip, p.colo, p.country)
+                        }
+                    }
+                    var acc: [(String, String?, String?)] = []
+                    for await v in group { acc.append(v) }
+                    return acc
+                }
+                var byIP: [String: (colo: String?, country: String?)] = [:]
+                for (ip, colo, country) in infos { byIP[ip] = (colo, country) }
+                for j in filtered.indices {
+                    if let info = byIP[filtered[j].ip] {
+                        filtered[j].colo = info.colo
+                        filtered[j].country = info.country
+                    }
+                }
+                for r in batch {
+                    probed.insert(r.ip)
+                    if let j = filtered.firstIndex(where: { $0.ip == r.ip }),
+                       regionPref.matches(colo: filtered[j].colo, country: filtered[j].country),
+                       !matched.contains(where: { $0.ip == r.ip }) {
+                        matched.append(filtered[j])
+                    }
+                }
+                statusText = "地区筛选中（\(regionPref.label)）：已探测 \(probed.count) 个，命中 \(matched.count) 个"
+                progress = 0.7 + 0.15 * Double(probed.count) / Double(max(filtered.count, 1))
+                results = Self.displaySorted(filtered.filter { probed.contains($0.ip) })
+            }
+            if cancelled {
+                statusText = "已停止。地区筛选（\(regionPref.label)）命中 \(matched.count) 个"
+                results = matched
+                progress = 1
+                isRunning = false
+                return
+            }
+            guard !matched.isEmpty else {
+                statusText = "探测了 \(probed.count) 个低延迟 IP，没有实际落到\(regionPref.label)的（它们的真实落点见列表中的地区码）。可以换个地区，或选不限。"
+                results = filtered.filter { probed.contains($0.ip) }
+                progress = 1
+                isRunning = false
+                return
+            }
+            filtered = matched
+            statusText = "地区筛选完成：\(matched.count) 个 IP 落在\(regionPref.label)"
+        }
+
         // ---------- 第二阶段：下载测速（从低延迟开始逐个测，和 CFST 一样） ----------
         if doDownload {
             let queueCount = min(nDownload, filtered.count)
@@ -194,7 +315,7 @@ final class Scanner: ObservableObject {
                 filtered[i].colo = outcome.colo
                 filtered[i].note = outcome.note
                 results = Self.displaySorted(filtered)
-                progress = 0.8 + 0.2 * Double(i + 1) / Double(queueCount)
+                progress = (regionPref == .any ? 0.8 : 0.85) + (regionPref == .any ? 0.2 : 0.15) * Double(i + 1) / Double(queueCount)
             }
             filtered = Self.displaySorted(filtered)
             statusText = cancelled

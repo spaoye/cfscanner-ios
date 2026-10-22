@@ -96,6 +96,12 @@ struct ContentView: View {
                 }
 
                 Section("参数") {
+                    Picker("目标地区", selection: $scanner.region) {
+                        ForEach(RegionPreference.allCases) { r in
+                            Text(r.label).tag(r)
+                        }
+                    }
+                    .pickerStyle(.menu)
                     settingRow("平均延迟上限", value: "\(Int(scanner.maxLatencyMs)) ms") {
                         Slider(value: $scanner.maxLatencyMs, in: 50...500, step: 10)
                     }
@@ -123,7 +129,7 @@ struct ContentView: View {
                 }
 
                 Section {
-                    Text("测速域名用 speed.cloudflare.com（Cloudflare 官方）。延迟测速是 TCPing（443 端口），和 CFST 默认模式一致；下载测速连到候选 IP 并以该域名做 SNI/Host，地区码取自 CF-RAY 响应头。")
+                    Text("测速域名用 speed.cloudflare.com（Cloudflare 官方）。延迟测速是 TCPing（443 端口），和 CFST 默认模式一致；下载测速连到候选 IP 并以该域名做 SNI/Host。地区选择按实测落点过滤：CF 是 anycast，IP 没有固定归属地，App 会逐个连接确认每个 IP 实际落到哪个机房，只保留目标地区的再做下载测速。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

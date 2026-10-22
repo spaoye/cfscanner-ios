@@ -47,6 +47,14 @@ enum NetTest {
     static func downloadTest(ip: String, testHost: String, seconds: TimeInterval) -> (mbps: Double, colo: String?, note: String?) {
         DownloadTester(ip: ip, testHost: testHost, seconds: seconds).run()
     }
+
+    // MARK: - 落点探测：GET /cdn-cgi/trace（同样连候选 IP、SNI 用测速域名），
+    // 响应正文带 colo=XXX（机房代码）和 loc=XX（国家），地区筛选就靠它。
+    // CF 是 anycast，IP 没有固定归属地，只能逐个连上去看它实际落在哪。
+
+    static func probe(ip: String, testHost: String) async -> (colo: String?, country: String?) {
+        await TraceProbe(ip: ip, testHost: testHost).run()
+    }
 }
 
 /// 保证闭包只执行一次（超时和完成回调赛跑时用）
@@ -205,5 +213,88 @@ private final class DownloadTester {
             }
         }
         return rayFallback
+    }
+}
+
+/// 一次轻量 HTTPS 请求拿落点信息：连候选 IP，SNI/Host 用测速域名，
+/// 读 /cdn-cgi/trace 的正文（纯文本 key=value），解析 colo= 和 loc=。
+private final class TraceProbe {
+    private let ip: String
+    private let testHost: String
+    private let queue = DispatchQueue(label: "cfscanner.probe")
+    private var buffer = Data()
+    private var colo: String?
+    private var country: String?
+
+    init(ip: String, testHost: String) {
+        self.ip = ip
+        self.testHost = testHost
+    }
+
+    func run() async -> (colo: String?, country: String?) {
+        await withCheckedContinuation { continuation in
+            let box = OnceBox()
+            let tlsOptions = NWProtocolTLS.Options()
+            testHost.withCString { ptr in
+                sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, ptr)
+            }
+            sec_protocol_options_set_verify_block(tlsOptions.securityProtocolOptions, { _, _, complete in
+                complete(true)
+            }, queue)
+            let conn = NWConnection(host: NWEndpoint.Host(ip), port: 443, using: NWParameters(tls: tlsOptions))
+
+            func finish() {
+                box.run {
+                    conn.cancel()
+                    continuation.resume(returning: (self.colo, self.country))
+                }
+            }
+
+            conn.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    let request = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: \(self.testHost)\r\nUser-Agent: CFScanner/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+                    conn.send(content: Data(request.utf8), completion: .contentProcessed { _ in
+                        self.receiveNext(conn, finish: finish)
+                    })
+                case .failed, .cancelled:
+                    finish()
+                default:
+                    break
+                }
+            }
+            conn.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + 3) { finish() }
+        }
+    }
+
+    private func receiveNext(_ conn: NWConnection, finish: @escaping () -> Void) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, isComplete, error in
+            guard let self else { finish(); return }
+            if let data, !data.isEmpty {
+                self.buffer.append(data)
+                self.parseBuffer()
+            }
+            if isComplete || error != nil {
+                finish()
+            } else if data != nil {
+                self.receiveNext(conn, finish: finish)
+            }
+        }
+    }
+
+    private func parseBuffer() {
+        guard let text = String(data: buffer, encoding: .utf8) else { return }
+        for line in text.split(separator: "\n") {
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.hasPrefix("colo=") {
+                colo = String(t.dropFirst("colo=".count))
+            } else if t.hasPrefix("loc=") {
+                country = String(t.dropFirst("loc=".count))
+            }
+        }
+        if colo == nil {
+            colo = DownloadTester.parseColo(text)
+        }
     }
 }
