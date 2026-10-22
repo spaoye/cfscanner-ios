@@ -102,6 +102,18 @@ struct ContentView: View {
                         }
                     }
                     .pickerStyle(.menu)
+                    if scanner.region == .carrier {
+                        Picker("运营商", selection: $scanner.carrierChoice) {
+                            Text("自动识别").tag("auto")
+                            Text("中国电信").tag("telecom")
+                            Text("中国联通").tag("unicom")
+                            Text("中国移动").tag("mobile")
+                        }
+                        .pickerStyle(.menu)
+                        Text("按运营商筛选优先落点（电信 HKG/NRT/KIX/SIN/LAX/SJC、联通 HKG/TPE/NRT/KIX/SIN/ICN、移动 HKG/SIN/NRT/TPE/ICN/LAX），最后仍按实测速度排名。自动识别查的是当前网络出口的运营商——开着 VPN 时会识别成 VPN 出口那家，请关掉代理测速，或在这里手动选。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     settingRow("平均延迟上限", value: "\(Int(scanner.maxLatencyMs)) ms") {
                         Slider(value: $scanner.maxLatencyMs, in: 50...500, step: 10)
                     }

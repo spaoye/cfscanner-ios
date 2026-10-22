@@ -3,12 +3,13 @@ import Foundation
 /// 目标地区：按连接实测的落点（机房/国家）过滤，不是按 IP 归属——
 /// CF 是 anycast，同一个 IP 在不同网络、不同时间可能落到不同机房，只能现测现筛。
 enum RegionPreference: String, CaseIterable, Identifiable {
-    case local, any, hongKong, taiwan, singapore, japan, korea, usWest, usEast, europe
+    case carrier, local, any, hongKong, taiwan, singapore, japan, korea, usWest, usEast, europe
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .carrier: return "本地（按运营商）"
         case .local: return "本地（自动探测）"
         case .any: return "不限"
         case .hongKong: return "香港"
@@ -51,6 +52,39 @@ enum RegionPreference: String, CaseIterable, Identifiable {
     }
 }
 
+/// 本地运营商：三家运营商到 Cloudflare 各机房的路由质量差别很大，
+/// 按运营商给一组优先落点（社区常用优选经验），再用实测落点筛选、按实测速度排名。
+enum Carrier: String, CaseIterable, Identifiable {
+    case telecom, unicom, mobile
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .telecom: return "中国电信"
+        case .unicom: return "中国联通"
+        case .mobile: return "中国移动"
+        }
+    }
+
+    /// 该运营商的优先机房代码集合
+    var colos: Set<String> {
+        switch self {
+        case .telecom: return ["HKG", "NRT", "KIX", "SIN", "LAX", "SJC"]
+        case .unicom: return ["HKG", "TPE", "NRT", "KIX", "SIN", "ICN"]
+        case .mobile: return ["HKG", "SIN", "NRT", "TPE", "ICN", "LAX"]
+        }
+    }
+
+    var coloListText: String {
+        switch self {
+        case .telecom: return "HKG/NRT/KIX/SIN/LAX/SJC"
+        case .unicom: return "HKG/TPE/NRT/KIX/SIN/ICN"
+        case .mobile: return "HKG/SIN/NRT/TPE/ICN/LAX"
+        }
+    }
+}
+
 struct ScanResult: Identifiable {
     let id = UUID()
     let ip: String
@@ -68,17 +102,23 @@ struct ScanResult: Identifiable {
 final class Scanner: ObservableObject {
 
     // MARK: 设置（界面直接绑定，默认值对齐 CFST）
-    @Published var region: RegionPreference = .local {   // 目标地区（按实测落点过滤；默认本地自动探测）
+    @Published var region: RegionPreference = .carrier {   // 目标地区（按实测落点过滤；默认按本地运营商）
         didSet { UserDefaults.standard.set(region.rawValue, forKey: Self.regionKey) }
     }
     private static let regionKey = "cfscanner.region"
+    private static let regionMigratedKey = "cfscanner.regionMigratedV2"
+    /// 运营商选择：auto（自动识别）/ telecom / unicom / mobile，仅「本地（按运营商）」模式用
+    @Published var carrierChoice: String = "auto" {
+        didSet { UserDefaults.standard.set(carrierChoice, forKey: Self.carrierKey) }
+    }
+    private static let carrierKey = "cfscanner.carrier"
     @Published var maxLatencyMs: Double = 200      // -tl  平均延迟上限
     @Published var lossLimitPct: Double = 25       // -tlr 丢包率上限（%）
     @Published var attempts: Double = 4            // -t   每个 IP 延迟测速次数
     @Published var concurrency: Double = 60        // -n   延迟测速并发
     @Published var candidateTarget: Double = 800   //      候选 IP 总数（手机上别太贪）
     @Published var doDownload: Bool = true         // -dd  的反面：是否做下载测速
-    @Published var downloadCount: Double = 10      // -dn  下载测速数量
+    @Published var downloadCount: Double = 15      // -dn  下载测速数量
     @Published var downloadSeconds: Double = 8     // -dt  单个 IP 下载测速时长
 
     // MARK: 状态
@@ -98,9 +138,21 @@ final class Scanner: ObservableObject {
     private static let customNameKey = "cfscanner.customIPName"
 
     init() {
-        if let raw = UserDefaults.standard.string(forKey: Self.regionKey),
+        let defaults = UserDefaults.standard
+        if let raw = defaults.string(forKey: Self.regionKey),
            let saved = RegionPreference(rawValue: raw) {
-            region = saved
+            // 一次性迁移：老默认「本地（自动探测）」升到「本地（按运营商）」（用户明确要求按运营商优选）；
+            // 之后用户再手动改回去，不会被二次迁移
+            if saved == .local && !defaults.bool(forKey: Self.regionMigratedKey) {
+                region = .carrier
+                defaults.set(true, forKey: Self.regionMigratedKey)
+                defaults.set(RegionPreference.carrier.rawValue, forKey: Self.regionKey)
+            } else {
+                region = saved
+            }
+        }
+        if let c = defaults.string(forKey: Self.carrierKey) {
+            carrierChoice = c
         }
         if let text = UserDefaults.standard.string(forKey: Self.customTextKey),
            let name = UserDefaults.standard.string(forKey: Self.customNameKey) {
@@ -166,7 +218,29 @@ final class Scanner: ObservableObject {
         let dlSeconds = downloadSeconds
         let host = testHost
         let regionPref = region
+        let carrierChoiceSnap = carrierChoice
         let latencyShare = regionPref == .any ? (doDownload ? 0.8 : 1.0) : 0.7
+
+        // 运营商模式：先定运营商（手动选择优先，其次自动识别当前网络出口的运营商）
+        var activeCarrier: Carrier? = nil
+        var carrierSource = ""
+        if regionPref == .carrier {
+            if let manual = Carrier(rawValue: carrierChoiceSnap) {
+                activeCarrier = manual
+                carrierSource = "手动选择"
+            } else {
+                statusText = "正在识别本地运营商…"
+                if let detected = await NetTest.detectCarrier() {
+                    activeCarrier = detected
+                    carrierSource = "自动识别"
+                }
+            }
+            if let c = activeCarrier {
+                statusText = "运营商：\(c.label)（\(carrierSource)），优先落点 \(c.coloListText)，开始测速"
+            } else {
+                statusText = "运营商识别失败，已改用自动探测主落点（也可以在参数里手动选运营商）"
+            }
+        }
 
         let candidates: [String]
         if let custom = customIPs, !custom.isEmpty {
@@ -243,10 +317,14 @@ final class Scanner: ObservableObject {
         }
 
         // ---------- 地区筛选：从最低延迟开始逐批探测落点，只留目标地区的 ----------
-        // 「本地」模式：先探测最快的一批 IP 实际落到哪个机房，出现最多的那个就是
-        // 当前网络的本地落点，之后按它过滤（换网络/换运营商，落点会自动跟着变）。
+        // 「本地（自动探测）」：先探测最快的一批 IP 实际落到哪个机房，出现最多的那个就是
+        // 当前网络的本地落点，之后按它过滤。
+        // 「本地（按运营商）」：只留落到该运营商优先机房的 IP；优先机房一个都没命中时，
+        // 退回按实际主落点筛选并在状态栏说明，不让用户空手而归。
         if regionPref != .any {
-            let isLocal = regionPref == .local
+            let isCarrier = regionPref == .carrier && activeCarrier != nil
+            let isLocal = regionPref == .local || (regionPref == .carrier && activeCarrier == nil)
+            let probeCap = isCarrier ? 400 : 200
             let want = doDownload ? max(nDownload, 1) : Int.max
             var matched: [ScanResult] = []
             var probed = Set<String>()
@@ -254,7 +332,8 @@ final class Scanner: ObservableObject {
             let batchSize = 20
             var detectedColo: String?
             var detectedCountry: String?
-            while idx < filtered.count && matched.count < want && probed.count < 200 {
+            var coloCounts: [String: Int] = [:]
+            while idx < filtered.count && matched.count < want && probed.count < probeCap {
                 if cancelled { break }
                 let batch = Array(filtered[idx..<min(idx + batchSize, filtered.count)])
                 idx += batch.count
@@ -275,6 +354,12 @@ final class Scanner: ObservableObject {
                     if let info = byIP[filtered[j].ip] {
                         filtered[j].colo = info.colo
                         filtered[j].country = info.country
+                    }
+                }
+                for r in batch {
+                    if let j = filtered.firstIndex(where: { $0.ip == r.ip }),
+                       let c = filtered[j].colo {
+                        coloCounts[c, default: 0] += 1
                     }
                 }
                 // 本地模式：第一批探测完就定主落点（出现次数最多，同票取先出现的，即延迟更低那批里的）
@@ -300,41 +385,57 @@ final class Scanner: ObservableObject {
                 for r in batch {
                     probed.insert(r.ip)
                     guard let j = filtered.firstIndex(where: { $0.ip == r.ip }) else { continue }
-                    let hit = isLocal
-                        ? (detectedColo != nil && filtered[j].colo == detectedColo)
-                        : regionPref.matches(colo: filtered[j].colo, country: filtered[j].country)
+                    let hit: Bool
+                    if isCarrier {
+                        hit = filtered[j].colo.map { activeCarrier!.colos.contains($0) } ?? false
+                    } else if isLocal {
+                        hit = detectedColo != nil && filtered[j].colo == detectedColo
+                    } else {
+                        hit = regionPref.matches(colo: filtered[j].colo, country: filtered[j].country)
+                    }
                     if hit && !matched.contains(where: { $0.ip == r.ip }) {
                         matched.append(filtered[j])
                     }
                 }
-                let label = isLocal ? "本地·\(detectedColo ?? "探测中")" : regionPref.label
+                let label = isCarrier ? "\(activeCarrier!.label)·优选落点"
+                    : isLocal ? "本地·\(detectedColo ?? "探测中")" : regionPref.label
                 statusText = "地区筛选中（\(label)）：已探测 \(probed.count) 个，命中 \(matched.count) 个"
                 progress = 0.7 + 0.15 * Double(probed.count) / Double(max(filtered.count, 1))
                 results = Self.displaySorted(filtered.filter { probed.contains($0.ip) })
             }
             if cancelled {
-                let label = isLocal ? "本地·\(detectedColo ?? "未定")" : regionPref.label
+                let label = isCarrier ? "\(activeCarrier!.label)·优选落点"
+                    : isLocal ? "本地·\(detectedColo ?? "未定")" : regionPref.label
                 statusText = "已停止。地区筛选（\(label)）命中 \(matched.count) 个"
                 results = matched
                 progress = 1
                 isRunning = false
                 return
             }
+            // 运营商模式兜底：优先机房零命中时改按实际主落点筛
+            var fellBackNote: String? = nil
+            if isCarrier && matched.isEmpty,
+               let dom = coloCounts.max(by: { $0.value < $1.value })?.key {
+                matched = filtered.filter { probed.contains($0.ip) && $0.colo == dom }
+                let country = filtered.first(where: { $0.colo == dom })?.country
+                fellBackNote = "没有 IP 落到\(activeCarrier!.label)的优先机房（\(activeCarrier!.coloListText)），已按实际主落点 \(dom)（\(Self.countryName(country))）筛选，命中 \(matched.count) 个"
+            }
             if isLocal && detectedColo == nil {
                 // 一个落点都没探到（网络异常等）：不硬筛，按不限地区继续后面的流程
                 statusText = "落点探测失败（探测了 \(probed.count) 个都没拿到机房信息），已按不限地区继续。"
+            } else if matched.isEmpty {
+                statusText = "探测了 \(probed.count) 个低延迟 IP，没有实际落到\(regionPref.label)的（它们的真实落点见列表中的地区码）。可以换个地区，或选不限。"
+                results = filtered.filter { probed.contains($0.ip) }
+                progress = 1
+                isRunning = false
+                return
             } else {
-                guard !matched.isEmpty else {
-                    statusText = "探测了 \(probed.count) 个低延迟 IP，没有实际落到\(regionPref.label)的（它们的真实落点见列表中的地区码）。可以换个地区，或选不限。"
-                    results = filtered.filter { probed.contains($0.ip) }
-                    progress = 1
-                    isRunning = false
-                    return
-                }
                 filtered = matched
-                statusText = isLocal
+                statusText = fellBackNote ?? (isLocal
                     ? "本地筛选完成：你的网络主要落到 \(detectedColo!)（\(Self.countryName(detectedCountry))），命中 \(matched.count) 个 IP"
-                    : "地区筛选完成：\(matched.count) 个 IP 落在\(regionPref.label)"
+                    : isCarrier
+                    ? "运营商筛选完成：\(activeCarrier!.label)优先落点命中 \(matched.count) 个 IP"
+                    : "地区筛选完成：\(matched.count) 个 IP 落在\(regionPref.label)")
             }
         }
 
@@ -354,10 +455,34 @@ final class Scanner: ObservableObject {
                 results = Self.displaySorted(filtered)
                 progress = (regionPref == .any ? 0.8 : 0.85) + (regionPref == .any ? 0.2 : 0.15) * Double(i + 1) / Double(queueCount)
             }
+            // 决赛复测：第一轮前 5 名再测一轮、取两次里的更好成绩——
+            // 避免某个 IP 只因测速那几秒的瞬时拥塞被埋没，或靠运气冲到第一
+            var retested = false
+            if !cancelled {
+                let ranked = filtered.indices
+                    .filter { (filtered[$0].downloadMBps ?? 0) > 0 }
+                    .sorted { (filtered[$0].downloadMBps ?? 0) > (filtered[$1].downloadMBps ?? 0) }
+                let finalists = Array(ranked.prefix(5))
+                retested = !finalists.isEmpty
+                for (k, i) in finalists.enumerated() {
+                    if cancelled { break }
+                    statusText = "决赛复测 \(k + 1)/\(finalists.count)：\(filtered[i].ip)"
+                    let ip = filtered[i].ip
+                    let outcome = await Task.detached {
+                        NetTest.downloadTest(ip: ip, testHost: host, seconds: dlSeconds)
+                    }.value
+                    if outcome.mbps > (filtered[i].downloadMBps ?? 0) {
+                        filtered[i].downloadMBps = outcome.mbps
+                        filtered[i].colo = outcome.colo
+                        filtered[i].note = outcome.note
+                    }
+                    results = Self.displaySorted(filtered)
+                }
+            }
             filtered = Self.displaySorted(filtered)
             statusText = cancelled
                 ? "已停止，已测 \(filtered.filter { $0.downloadMBps != nil }.count) 个下载速度"
-                : "完成：\(filtered.count) 个 IP 通过筛选，第一名就是速度最快、延迟也低的那个"
+                : "完成：\(filtered.count) 个 IP 通过筛选\(retested ? "（前 5 名经复测取最佳）" : "")，第一名就是速度最快、延迟也低的那个"
         } else {
             statusText = "完成（已禁用下载测速，按延迟排序）：共 \(filtered.count) 个可用 IP"
         }

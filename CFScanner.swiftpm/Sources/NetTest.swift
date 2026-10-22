@@ -48,6 +48,47 @@ enum NetTest {
         DownloadTester(ip: ip, testHost: testHost, seconds: seconds).run()
     }
 
+    // MARK: - 运营商识别：查当前网络出口 IP 的运营商（ipwho.is，失败再试 ipapi.co），
+    // 按 ISP 名称 / AS 号判断是电信、联通还是移动。注意：开着 VPN/代理时识别到的是
+    // 出口那边的运营商，所以 App 里同时提供手动选择。
+
+    static func detectCarrier() async -> Carrier? {
+        if let c = await carrierFromIPWho() { return c }
+        return await carrierFromIPAPICo()
+    }
+
+    private static func carrierFromIPWho() async -> Carrier? {
+        guard let url = URL(string: "https://ipwho.is/") else { return nil }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 5
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let conn = obj["connection"] as? [String: Any] else { return nil }
+        let parts = [conn["isp"] as? String,
+                     conn["org"] as? String,
+                     (conn["asn"] as? Int).map { "AS\($0)" },
+                     conn["asn"] as? String]
+        return matchCarrier(parts.compactMap { $0 }.joined(separator: " "))
+    }
+
+    private static func carrierFromIPAPICo() async -> Carrier? {
+        guard let url = URL(string: "https://ipapi.co/json/") else { return nil }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 5
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let parts = [obj["org"] as? String, obj["asn"] as? String]
+        return matchCarrier(parts.compactMap { $0 }.joined(separator: " "))
+    }
+
+    private static func matchCarrier(_ text: String) -> Carrier? {
+        let t = text.uppercased()
+        if t.contains("CHINA MOBILE") || t.contains("CMCC") || t.contains("AS9808") || t.contains("AS56048") || t.contains("AS58453") { return .mobile }
+        if t.contains("CHINA UNICOM") || t.contains("AS4837") || t.contains("AS9929") || t.contains("AS17621") { return .unicom }
+        if t.contains("CHINA TELECOM") || t.contains("CHINANET") || t.contains("AS4134") || t.contains("AS4809") || t.contains("AS4812") { return .telecom }
+        return nil
+    }
+
     // MARK: - 落点探测：GET /cdn-cgi/trace（同样连候选 IP、SNI 用测速域名），
     // 响应正文带 colo=XXX（机房代码）和 loc=XX（国家），地区筛选就靠它。
     // CF 是 anycast，IP 没有固定归属地，只能逐个连上去看它实际落在哪。
@@ -77,6 +118,7 @@ private final class DownloadTester {
     private let queue = DispatchQueue(label: "cfscanner.download")
     private let finishOnce = OnceBox()
     private var totalBytes = 0
+    private var samples: [(t: Double, bytes: Int)] = []   // (距开始秒数, 累计字节)，给预热后计速用
     private var headerBuffer = Data()
     private var headerDone = false
     private var statusCode: Int?
@@ -148,7 +190,19 @@ private final class DownloadTester {
             } else if totalBytes == 0 {
                 note = "无数据"
             }
-            let mbps = (elapsed > 0.05 && note == nil) ? Double(totalBytes) / elapsed / 1_000_000 : 0
+            var mbps = 0.0
+            if elapsed > 0.05 && note == nil {
+                let warmup = 1.5
+                if elapsed > warmup + 0.5,
+                   let base = samples.last(where: { $0.t <= warmup }),
+                   totalBytes > base.bytes {
+                    // 跳过 TCP 慢启动的前 1.5 秒再计速：高延迟连接起步吃亏，
+                    // 预热后计速的名次更稳、更接近真实持续速度
+                    mbps = Double(totalBytes - base.bytes) / (elapsed - base.t) / 1_000_000
+                } else {
+                    mbps = Double(totalBytes) / elapsed / 1_000_000
+                }
+            }
             finalResult = (mbps, colo, note)
             connection?.cancel()
             semaphore?.signal()
@@ -175,6 +229,10 @@ private final class DownloadTester {
                     }
                 } else {
                     self.totalBytes += data.count
+                }
+                if let st = self.startTime {
+                    let t = Double(DispatchTime.now().uptimeNanoseconds - st.uptimeNanoseconds) / 1_000_000_000
+                    self.samples.append((t, self.totalBytes))
                 }
             }
             if isComplete || error != nil {
