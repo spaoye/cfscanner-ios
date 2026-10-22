@@ -34,6 +34,49 @@ final class Scanner: ObservableObject {
     private var cancelled = false
     let testHost = "speed.cloudflare.com"
 
+    // MARK: 自选 IP 列表（导入后持久化，优先于官方段随机抽样）
+    @Published private(set) var customListName: String?
+    @Published private(set) var customListCount: Int = 0
+    private var customIPs: [String]?
+    private static let customTextKey = "cfscanner.customIPText"
+    private static let customNameKey = "cfscanner.customIPName"
+
+    init() {
+        if let text = UserDefaults.standard.string(forKey: Self.customTextKey),
+           let name = UserDefaults.standard.string(forKey: Self.customNameKey) {
+            let ips = IPRanges.parseCustomList(text)
+            if !ips.isEmpty {
+                customIPs = ips
+                customListName = name
+                customListCount = ips.count
+            }
+        }
+    }
+
+    /// 导入自选 IP 文件内容；解析不到有效 IP 时不保存并说明原因
+    func importCustomList(text: String, name: String) {
+        let ips = IPRanges.parseCustomList(text)
+        guard !ips.isEmpty else {
+            statusText = "导入失败：\(name) 里没找到有效的 IP 或网段（每行一个 IP，或 104.16.0.0/24 这样的网段，CSV 取第一列）。"
+            return
+        }
+        customIPs = ips
+        customListName = name
+        customListCount = ips.count
+        UserDefaults.standard.set(text, forKey: Self.customTextKey)
+        UserDefaults.standard.set(name, forKey: Self.customNameKey)
+        statusText = "已导入自选列表：\(name)，共 \(ips.count) 个 IP。下次测速只测这些。"
+    }
+
+    func clearCustomList() {
+        customIPs = nil
+        customListName = nil
+        customListCount = 0
+        UserDefaults.standard.removeObject(forKey: Self.customTextKey)
+        UserDefaults.standard.removeObject(forKey: Self.customNameKey)
+        statusText = "已清除自选列表，恢复用 Cloudflare 官方 IP 段随机抽样。"
+    }
+
     func toggle() {
         isRunning ? stop() : start()
     }
@@ -63,7 +106,13 @@ final class Scanner: ObservableObject {
         let dlSeconds = downloadSeconds
         let host = testHost
 
-        let candidates = IPRanges.candidates(targetCount: Int(candidateTarget))
+        let candidates: [String]
+        if let custom = customIPs, !custom.isEmpty {
+            // 自选列表优先；太多时随机抽 8000 个（手机上跑完一轮的时间上限）
+            candidates = custom.count > 8000 ? Array(custom.shuffled().prefix(8000)) : custom
+        } else {
+            candidates = IPRanges.candidates(targetCount: Int(candidateTarget))
+        }
         guard !candidates.isEmpty else {
             statusText = "候选 IP 生成失败"
             isRunning = false

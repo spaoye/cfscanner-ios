@@ -153,13 +153,17 @@ private final class DownloadTester {
             if let data, !data.isEmpty {
                 if !self.headerDone {
                     self.headerBuffer.append(data)
-                    if let text = String(data: self.headerBuffer, encoding: .utf8),
-                       let end = text.range(of: "\r\n\r\n") {
+                    // 在字节层找响应头结束标记，只把头部转字符串，
+                    // 避免 body 的二进制字节干扰头部解析（地区码之前没显示就是这个原因的嫌疑最大）
+                    let terminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
+                    if let range = self.headerBuffer.range(of: terminator) {
                         self.headerDone = true
-                        let head = String(text[..<end.upperBound])
+                        let headData = self.headerBuffer.subdata(in: 0..<range.upperBound)
+                        let head = String(data: headData, encoding: .utf8) ?? ""
                         self.statusCode = Self.parseStatus(head)
                         self.colo = Self.parseColo(head)
-                        self.totalBytes += self.headerBuffer.count - head.utf8.count
+                        self.totalBytes += self.headerBuffer.count - range.upperBound
+                        self.headerBuffer = Data()
                     }
                 } else {
                     self.totalBytes += data.count
@@ -183,17 +187,23 @@ private final class DownloadTester {
         return Int(parts[1])
     }
 
-    /// CF-RAY: 8f3a……-LAX -> LAX
+    /// 地区码：优先用测速接口自带的 colo 响应头，没有再从 CF-RAY 后缀解析
     static func parseColo(_ headers: String) -> String? {
+        var rayFallback: String?
         for line in headers.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.lowercased().hasPrefix("cf-ray:") {
+            let lower = trimmed.lowercased()
+            if lower.hasPrefix("colo:") {
+                let value = trimmed.dropFirst("colo:".count).trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { return String(value) }
+            }
+            if lower.hasPrefix("cf-ray:") {
                 let value = trimmed.dropFirst("cf-ray:".count).trimmingCharacters(in: .whitespaces)
                 if let dash = value.lastIndex(of: "-") {
-                    return String(value[value.index(after: dash)...])
+                    rayFallback = String(value[value.index(after: dash)...])
                 }
             }
         }
-        return nil
+        return rayFallback
     }
 }

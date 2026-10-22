@@ -63,4 +63,44 @@ enum IPRanges {
         }
         return chosen.map { uint32ToIP($0 + UInt32.random(in: 1...254)) }
     }
+
+    /// 解析自选 IP 列表（兼容 CFST 的 ip.txt 与 result.csv）：
+    /// 每行一个 IPv4 或 CIDR 网段，CSV 取第一列，# 开头是注释，空行跳过。
+    /// CIDR 段直接展开（单段上限 65536 个，超大段随机抽 8192 个），结果去重、保序。
+    static func parseCustomList(_ text: String) -> [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+        func add(_ ip: String) {
+            if seen.insert(ip).inserted { result.append(ip) }
+        }
+        for rawLine in text.components(separatedBy: .newlines) {
+            var line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            if let comma = line.firstIndex(of: ",") {
+                line = String(line[..<comma]).trimmingCharacters(in: .whitespaces)
+            }
+            line = line.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if line.isEmpty { continue }
+            if line.contains("/") {
+                let pair = line.split(separator: "/")
+                guard pair.count == 2,
+                      let base = ipToUInt32(String(pair[0])),
+                      let prefix = Int(pair[1]), (0...32).contains(prefix) else { continue }
+                let hostBits = 32 - prefix
+                let total = UInt64(1) << UInt64(hostBits)   // hostBits 最大 32，UInt64 装得下
+                let mask: UInt32 = prefix == 0 ? 0 : UInt32.max << UInt32(32 - prefix)
+                let network = base & mask
+                if total <= 65536 {
+                    for i in 0..<UInt32(total) { add(uint32ToIP(network &+ i)) }
+                } else {
+                    for _ in 0..<8192 {
+                        add(uint32ToIP(network &+ UInt32(truncatingIfNeeded: UInt64.random(in: 0..<total))))
+                    }
+                }
+            } else if ipToUInt32(line) != nil {
+                add(line)
+            }
+        }
+        return result
+    }
 }
