@@ -3,12 +3,13 @@ import Foundation
 /// 目标地区：按连接实测的落点（机房/国家）过滤，不是按 IP 归属——
 /// CF 是 anycast，同一个 IP 在不同网络、不同时间可能落到不同机房，只能现测现筛。
 enum RegionPreference: String, CaseIterable, Identifiable {
-    case any, hongKong, taiwan, singapore, japan, korea, usWest, usEast, europe
+    case local, any, hongKong, taiwan, singapore, japan, korea, usWest, usEast, europe
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .local: return "本地（自动探测）"
         case .any: return "不限"
         case .hongKong: return "香港"
         case .taiwan: return "台湾"
@@ -67,7 +68,7 @@ struct ScanResult: Identifiable {
 final class Scanner: ObservableObject {
 
     // MARK: 设置（界面直接绑定，默认值对齐 CFST）
-    @Published var region: RegionPreference = .any {   // 目标地区（按实测落点过滤）
+    @Published var region: RegionPreference = .local {   // 目标地区（按实测落点过滤；默认本地自动探测）
         didSet { UserDefaults.standard.set(region.rawValue, forKey: Self.regionKey) }
     }
     private static let regionKey = "cfscanner.region"
@@ -242,12 +243,17 @@ final class Scanner: ObservableObject {
         }
 
         // ---------- 地区筛选：从最低延迟开始逐批探测落点，只留目标地区的 ----------
+        // 「本地」模式：先探测最快的一批 IP 实际落到哪个机房，出现最多的那个就是
+        // 当前网络的本地落点，之后按它过滤（换网络/换运营商，落点会自动跟着变）。
         if regionPref != .any {
+            let isLocal = regionPref == .local
             let want = doDownload ? max(nDownload, 1) : Int.max
             var matched: [ScanResult] = []
             var probed = Set<String>()
             var idx = 0
             let batchSize = 20
+            var detectedColo: String?
+            var detectedCountry: String?
             while idx < filtered.count && matched.count < want && probed.count < 200 {
                 if cancelled { break }
                 let batch = Array(filtered[idx..<min(idx + batchSize, filtered.count)])
@@ -271,34 +277,65 @@ final class Scanner: ObservableObject {
                         filtered[j].country = info.country
                     }
                 }
+                // 本地模式：第一批探测完就定主落点（出现次数最多，同票取先出现的，即延迟更低那批里的）
+                if isLocal && detectedColo == nil {
+                    var counts: [String: Int] = [:]
+                    var order: [String] = []
+                    for r in batch {
+                        guard let j = filtered.firstIndex(where: { $0.ip == r.ip }),
+                              let c = filtered[j].colo else { continue }
+                        if counts[c] == nil { order.append(c) }
+                        counts[c, default: 0] += 1
+                    }
+                    var bestCount = -1
+                    for c in order where counts[c]! > bestCount {
+                        detectedColo = c
+                        bestCount = counts[c]!
+                    }
+                    if let dc = detectedColo,
+                       let j = filtered.firstIndex(where: { $0.colo == dc }) {
+                        detectedCountry = filtered[j].country
+                    }
+                }
                 for r in batch {
                     probed.insert(r.ip)
-                    if let j = filtered.firstIndex(where: { $0.ip == r.ip }),
-                       regionPref.matches(colo: filtered[j].colo, country: filtered[j].country),
-                       !matched.contains(where: { $0.ip == r.ip }) {
+                    guard let j = filtered.firstIndex(where: { $0.ip == r.ip }) else { continue }
+                    let hit = isLocal
+                        ? (detectedColo != nil && filtered[j].colo == detectedColo)
+                        : regionPref.matches(colo: filtered[j].colo, country: filtered[j].country)
+                    if hit && !matched.contains(where: { $0.ip == r.ip }) {
                         matched.append(filtered[j])
                     }
                 }
-                statusText = "地区筛选中（\(regionPref.label)）：已探测 \(probed.count) 个，命中 \(matched.count) 个"
+                let label = isLocal ? "本地·\(detectedColo ?? "探测中")" : regionPref.label
+                statusText = "地区筛选中（\(label)）：已探测 \(probed.count) 个，命中 \(matched.count) 个"
                 progress = 0.7 + 0.15 * Double(probed.count) / Double(max(filtered.count, 1))
                 results = Self.displaySorted(filtered.filter { probed.contains($0.ip) })
             }
             if cancelled {
-                statusText = "已停止。地区筛选（\(regionPref.label)）命中 \(matched.count) 个"
+                let label = isLocal ? "本地·\(detectedColo ?? "未定")" : regionPref.label
+                statusText = "已停止。地区筛选（\(label)）命中 \(matched.count) 个"
                 results = matched
                 progress = 1
                 isRunning = false
                 return
             }
-            guard !matched.isEmpty else {
-                statusText = "探测了 \(probed.count) 个低延迟 IP，没有实际落到\(regionPref.label)的（它们的真实落点见列表中的地区码）。可以换个地区，或选不限。"
-                results = filtered.filter { probed.contains($0.ip) }
-                progress = 1
-                isRunning = false
-                return
+            if isLocal && detectedColo == nil {
+                // 一个落点都没探到（网络异常等）：不硬筛，按不限地区继续后面的流程
+                statusText = "落点探测失败（探测了 \(probed.count) 个都没拿到机房信息），已按不限地区继续。"
+            } else {
+                guard !matched.isEmpty else {
+                    statusText = "探测了 \(probed.count) 个低延迟 IP，没有实际落到\(regionPref.label)的（它们的真实落点见列表中的地区码）。可以换个地区，或选不限。"
+                    results = filtered.filter { probed.contains($0.ip) }
+                    progress = 1
+                    isRunning = false
+                    return
+                }
+                filtered = matched
+                statusText = isLocal
+                    ? "本地筛选完成：你的网络主要落到 \(detectedColo!)（\(Self.countryName(detectedCountry))），命中 \(matched.count) 个 IP"
+                    : "地区筛选完成：\(matched.count) 个 IP 落在\(regionPref.label)"
             }
-            filtered = matched
-            statusText = "地区筛选完成：\(matched.count) 个 IP 落在\(regionPref.label)"
         }
 
         // ---------- 第二阶段：下载测速（从低延迟开始逐个测，和 CFST 一样） ----------
@@ -328,6 +365,21 @@ final class Scanner: ObservableObject {
         results = filtered
         progress = 1
         isRunning = false
+    }
+
+    /// 国家代码转中文名（状态栏显示本地落点时用）
+    static func countryName(_ code: String?) -> String {
+        switch code {
+        case "HK": return "香港"
+        case "TW": return "台湾"
+        case "SG": return "新加坡"
+        case "JP": return "日本"
+        case "KR": return "韩国"
+        case "US": return "美国"
+        case "CN": return "中国大陆"
+        case nil: return "未知"
+        default: return code!
+        }
     }
 
     /// 有下载速度的按速度降序在前，其余按延迟升序排后面
