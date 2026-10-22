@@ -95,6 +95,22 @@ enum Carrier: String, CaseIterable, Identifiable {
     }
 }
 
+/// 下载测速接口：向候选 IP 请求哪个文件来计速。候选 IP 是 Cloudflare 边缘，
+/// 所以测速文件本身也必须挂在 Cloudflare 后面（两个预置都满足）。
+enum DownloadSource: String, CaseIterable, Identifiable {
+    case parallels, cloudflare, custom
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .parallels: return "Parallels（exe 同款）"
+        case .cloudflare: return "Cloudflare 官方"
+        case .custom: return "自定义地址"
+        }
+    }
+}
+
 struct ScanResult: Identifiable {
     let id = UUID()
     let ip: String
@@ -132,6 +148,34 @@ final class Scanner: ObservableObject {
     @Published var doDownload: Bool = true         // -dd  的反面：是否做下载测速
     @Published var downloadCount: Double = 15      // -dn  下载测速数量
     @Published var downloadSeconds: Double = 8     // -dt  单个 IP 下载测速时长
+    @Published var downloadSource: DownloadSource = .parallels {   // 下载测速接口（默认 exe 同款）
+        didSet { UserDefaults.standard.set(downloadSource.rawValue, forKey: Self.downloadSourceKey) }
+    }
+    @Published var customDownloadURL: String = "" {                // downloadSource == .custom 时用
+        didSet { UserDefaults.standard.set(customDownloadURL, forKey: Self.customDownloadURLKey) }
+    }
+    private static let downloadSourceKey = "cfscanner.downloadSource"
+    private static let customDownloadURLKey = "cfscanner.customDownloadURL"
+
+    /// 当前测速接口的 (域名, 路径)：连接打到候选 IP，SNI/Host 用这个域名
+    var downloadEndpoint: (host: String, path: String) {
+        switch downloadSource {
+        case .cloudflare:
+            // 官方 /__down：bytes 必须 < 100000000，否则 403（构建 1 的坑）
+            return ("speed.cloudflare.com", "/__down?bytes=90000000")
+        case .parallels:
+            // exe 内置 cfstd 配置同款：download.parallels.com 本身在 Cloudflare 后面，333MB dmg
+            return ("download.parallels.com", "/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg")
+        case .custom:
+            let text = customDownloadURL.trimmingCharacters(in: .whitespaces)
+            if let url = URL(string: text), let h = url.host, !h.isEmpty {
+                var path = url.path.isEmpty ? "/" : url.path
+                if let q = url.query, !q.isEmpty { path += "?" + q }
+                return (h, path)
+            }
+            return ("download.parallels.com", "/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg")
+        }
+    }
 
     // MARK: 结果上传设置（总开关默认关；关时就是普通优选 App，不发出任何上传请求）
     @Published var uploadEnabled: Bool = false {
@@ -207,6 +251,11 @@ final class Scanner: ObservableObject {
             uploadMinSpeed = defaults.double(forKey: Self.uploadMinSpeedKey)
         }
         autoUpload = defaults.bool(forKey: Self.autoUploadKey)
+        if let raw = defaults.string(forKey: Self.downloadSourceKey),
+           let src = DownloadSource(rawValue: raw) {
+            downloadSource = src
+        }
+        customDownloadURL = defaults.string(forKey: Self.customDownloadURLKey) ?? ""
         if let text = UserDefaults.standard.string(forKey: Self.customTextKey),
            let name = UserDefaults.standard.string(forKey: Self.customNameKey) {
             let ips = IPRanges.parseCustomList(text)
@@ -287,6 +336,7 @@ final class Scanner: ObservableObject {
         let host = testHost
         let regionPref = region
         let carrierChoiceSnap = carrierChoice
+        let dlEndpoint = downloadEndpoint
         let latencyShare = regionPref == .any ? (doDownload ? 0.8 : 1.0) : 0.7
 
         // 运营商模式：先定运营商（手动选择优先，其次自动识别当前网络出口的运营商）
@@ -516,11 +566,11 @@ final class Scanner: ObservableObject {
                 statusText = "下载测速 \(i + 1)/\(queueCount)：\(filtered[i].ip)"
                 let ip = filtered[i].ip
                 let outcome = await Task.detached {
-                    NetTest.downloadTest(ip: ip, testHost: host, seconds: dlSeconds)
+                    NetTest.downloadTest(ip: ip, host: dlEndpoint.host, path: dlEndpoint.path, seconds: dlSeconds)
                 }.value
                 filtered[i].downloadMBps = outcome.mbps
                 filtered[i].speedSamples = [outcome.mbps]
-                filtered[i].colo = outcome.colo
+                if let c = outcome.colo { filtered[i].colo = c }
                 filtered[i].note = outcome.note
                 results = Self.displaySorted(filtered)
                 progress = (regionPref == .any ? 0.8 : 0.85) + (regionPref == .any ? 0.2 : 0.15) * Double(i + 1) / Double(queueCount)
@@ -539,11 +589,11 @@ final class Scanner: ObservableObject {
                     statusText = "决赛复测 \(k + 1)/\(finalists.count)：\(filtered[i].ip)"
                     let ip = filtered[i].ip
                     let outcome = await Task.detached {
-                        NetTest.downloadTest(ip: ip, testHost: host, seconds: dlSeconds)
+                        NetTest.downloadTest(ip: ip, host: dlEndpoint.host, path: dlEndpoint.path, seconds: dlSeconds)
                     }.value
                     if outcome.mbps > (filtered[i].downloadMBps ?? 0) {
                         filtered[i].downloadMBps = outcome.mbps
-                        filtered[i].colo = outcome.colo
+                        if let c = outcome.colo { filtered[i].colo = c }
                         filtered[i].note = outcome.note
                     }
                     filtered[i].speedSamples.append(outcome.mbps)

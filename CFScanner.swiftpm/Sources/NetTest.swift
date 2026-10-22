@@ -44,8 +44,8 @@ enum NetTest {
     // 等于或超过 1 亿会直接返回 HTTP 403（v1 就栽在这：请求了 104857600，
     // 每次只拿到 403 的 1 个字节，测速全是 0）。
 
-    static func downloadTest(ip: String, testHost: String, seconds: TimeInterval) -> (mbps: Double, colo: String?, note: String?) {
-        DownloadTester(ip: ip, testHost: testHost, seconds: seconds).run()
+    static func downloadTest(ip: String, host: String, path: String, seconds: TimeInterval) -> (mbps: Double, colo: String?, note: String?) {
+        DownloadTester(ip: ip, host: host, path: path, seconds: seconds).run()
     }
 
     // MARK: - 运营商识别：查当前网络出口 IP 的运营商（ipwho.is，失败再试 ipapi.co），
@@ -113,7 +113,8 @@ private final class OnceBox {
 
 private final class DownloadTester {
     private let ip: String
-    private let testHost: String
+    private let host: String
+    private let path: String
     private let seconds: TimeInterval
     private let queue = DispatchQueue(label: "cfscanner.download")
     private let finishOnce = OnceBox()
@@ -128,9 +129,10 @@ private final class DownloadTester {
     private var semaphore: DispatchSemaphore?
     private var finalResult: (mbps: Double, colo: String?, note: String?) = (0, nil, nil)
 
-    init(ip: String, testHost: String, seconds: TimeInterval) {
+    init(ip: String, host: String, path: String, seconds: TimeInterval) {
         self.ip = ip
-        self.testHost = testHost
+        self.host = host
+        self.path = path
         self.seconds = seconds
     }
 
@@ -140,7 +142,7 @@ private final class DownloadTester {
 
         let tlsOptions = NWProtocolTLS.Options()
         // 关键一步：连接目标是 IP，但 SNI 写测速域名
-        testHost.withCString { ptr in
+        host.withCString { ptr in
             sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, ptr)
         }
         // 证书是签给域名的、连的却是 IP，校验必然过不了；这是测速工具，只测速度，故跳过校验
@@ -156,8 +158,7 @@ private final class DownloadTester {
             switch state {
             case .ready:
                 self.startTime = DispatchTime.now()
-                // bytes=90000000：留了余量，没碰 1 亿的 403 红线
-                let request = "GET /__down?bytes=90000000 HTTP/1.1\r\nHost: \(self.testHost)\r\nUser-Agent: CFScanner/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+                let request = "GET \(self.path) HTTP/1.1\r\nHost: \(self.host)\r\nUser-Agent: CFScanner/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
                 connection.send(content: Data(request.utf8), completion: .contentProcessed { _ in
                     self.receiveNext(connection)
                 })

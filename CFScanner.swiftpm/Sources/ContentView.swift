@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var copiedIP: String?
     @State private var showImporter = false
     @State private var paramsExpanded = false
+    @State private var uploadExpanded = false
     @State private var importNote: String?
     @State private var showImportEditor = false
     @State private var importText = ""
@@ -180,11 +181,27 @@ struct ContentView: View {
                         settingRow("单个下载时长", value: "\(Int(scanner.downloadSeconds)) 秒") {
                             Slider(value: $scanner.downloadSeconds, in: 3...15, step: 1)
                         }
+                        Picker("测速接口", selection: $scanner.downloadSource) {
+                            ForEach(DownloadSource.allCases) { src in
+                                Text(src.label).tag(src)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        if scanner.downloadSource == .custom {
+                            TextField("自定义测速地址（https://…）", text: $scanner.customDownloadURL)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .font(.system(.footnote, design: .monospaced))
+                        }
+                        Text("下载测速时向候选 IP 请求的文件：Parallels 是电脑端 exe 用的同一个 333MB 安装包，Cloudflare 官方是 speed.cloudflare.com 的测速接口；都要求候选 IP 是 Cloudflare 边缘节点。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     }
                 }
 
-                Section("结果上传") {
+                Section {
+                    DisclosureGroup("结果上传", isExpanded: $uploadExpanded) {
                     Toggle("启用结果上传", isOn: $scanner.uploadEnabled)
                     if scanner.uploadEnabled {
                         TextField("接口地址", text: $scanner.uploadAPIURL)
@@ -230,10 +247,11 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    }
                 }
 
                 Section {
-                    Text("测速域名用 speed.cloudflare.com（Cloudflare 官方）。延迟测速是 TCPing（443 端口），和 CFST 默认模式一致；下载测速连到候选 IP 并以该域名做 SNI/Host。地区选择按实测落点过滤：CF 是 anycast，IP 没有固定归属地，App 会逐个连接确认每个 IP 实际落到哪个机房，只保留目标地区的再做下载测速。")
+                    Text("延迟测速是 TCPing（443 端口），和 CFST 默认模式一致；落点探测连候选 IP 查 speed.cloudflare.com 的 trace。下载测速连到候选 IP、以测速接口的域名做 SNI/Host 拉文件计速（接口在参数里可选）。地区选择按实测落点过滤：CF 是 anycast，IP 没有固定归属地，App 会逐个连接确认每个 IP 实际落到哪个机房，只保留目标地区的再做下载测速。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
