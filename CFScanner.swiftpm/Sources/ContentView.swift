@@ -139,7 +139,30 @@ struct ContentView: View {
                 }
 
                 Section {
+                    Picker("测速接口", selection: $scanner.downloadSource) {
+                        ForEach(DownloadSource.allCases) { src in
+                            Text(src.label).tag(src)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    if scanner.downloadSource == .custom {
+                        TextField("自定义测速地址（https://…）", text: $scanner.customDownloadURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(.footnote, design: .monospaced))
+                    }
+                    Text("下载测速时向候选 IP 请求的文件。Parallels 是 333MB 的安装包，Cloudflare 官方是 speed.cloudflare.com 的测速接口；都要求候选 IP 是 Cloudflare 边缘节点。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
                     DisclosureGroup("参数", isExpanded: $paramsExpanded) {
+                    if scanner.customListName != nil {
+                        Text("自选名单生效中：名单全部测速（超过 8000 个时随机抽 8000），「候选 IP 总数」不生效，其余参数照常生效。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Picker("目标地区", selection: $scanner.region) {
                         ForEach(RegionPreference.allCases) { r in
                             Text(r.label).tag(r)
@@ -158,44 +181,22 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    settingRow("平均延迟上限", value: "\(Int(scanner.maxLatencyMs)) ms") {
-                        Slider(value: $scanner.maxLatencyMs, in: 50...500, step: 10)
-                    }
-                    settingRow("丢包率上限", value: "\(Int(scanner.lossLimitPct)) %") {
-                        Slider(value: $scanner.lossLimitPct, in: 0...50, step: 5)
-                    }
-                    settingRow("每个 IP 测速次数", value: "\(Int(scanner.attempts)) 次") {
-                        Slider(value: $scanner.attempts, in: 1...6, step: 1)
-                    }
-                    settingRow("延迟测速并发", value: "\(Int(scanner.concurrency))") {
-                        Slider(value: $scanner.concurrency, in: 10...150, step: 10)
-                    }
-                    settingRow("候选 IP 总数", value: "\(Int(scanner.candidateTarget))") {
-                        Slider(value: $scanner.candidateTarget, in: 200...3000, step: 100)
+                    numberRow("平均延迟上限", value: $scanner.maxLatencyMs, range: 50...500, unit: "ms")
+                    numberRow("丢包率上限", value: $scanner.lossLimitPct, range: 0...50, unit: "%")
+                    numberRow("每个 IP 测速次数", value: $scanner.attempts, range: 1...6, unit: "次")
+                    numberRow("延迟测速并发", value: $scanner.concurrency, range: 10...150)
+                    numberRow("候选 IP 总数", value: $scanner.candidateTarget, range: 200...3000, unit: "个")
+                        .disabled(scanner.customListName != nil)
+                        .opacity(scanner.customListName != nil ? 0.45 : 1)
+                    if scanner.customListName != nil {
+                        Text("已导入自选名单，本项不生效：名单会全部测速。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     Toggle("下载测速", isOn: $scanner.doDownload)
                     if scanner.doDownload {
-                        settingRow("下载测速数量", value: "\(Int(scanner.downloadCount)) 个") {
-                            Slider(value: $scanner.downloadCount, in: 1...30, step: 1)
-                        }
-                        settingRow("单个下载时长", value: "\(Int(scanner.downloadSeconds)) 秒") {
-                            Slider(value: $scanner.downloadSeconds, in: 3...15, step: 1)
-                        }
-                        Picker("测速接口", selection: $scanner.downloadSource) {
-                            ForEach(DownloadSource.allCases) { src in
-                                Text(src.label).tag(src)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        if scanner.downloadSource == .custom {
-                            TextField("自定义测速地址（https://…）", text: $scanner.customDownloadURL)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .font(.system(.footnote, design: .monospaced))
-                        }
-                        Text("下载测速时向候选 IP 请求的文件：Parallels 是电脑端 exe 用的同一个 333MB 安装包，Cloudflare 官方是 speed.cloudflare.com 的测速接口；都要求候选 IP 是 Cloudflare 边缘节点。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        numberRow("下载测速数量", value: $scanner.downloadCount, range: 1...30, unit: "个")
+                        numberRow("单个下载时长", value: $scanner.downloadSeconds, range: 3...15, unit: "秒")
                     }
                     }
                 }
@@ -204,10 +205,18 @@ struct ContentView: View {
                     DisclosureGroup("结果上传", isExpanded: $uploadExpanded) {
                     Toggle("启用结果上传", isOn: $scanner.uploadEnabled)
                     if scanner.uploadEnabled {
-                        TextField("接口地址", text: $scanner.uploadAPIURL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.system(.footnote, design: .monospaced))
+                        HStack {
+                            TextField("https://…/api/client/uploadResult", text: $scanner.uploadAPIURL)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .font(.system(.footnote, design: .monospaced))
+                            Button("粘贴") {
+                                if let s = UIPasteboard.general.string {
+                                    scanner.uploadAPIURL = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                                }
+                            }
+                            .font(.callout)
+                        }
                         HStack {
                             TextField("上传令牌", text: $scanner.uploadToken)
                                 .textInputAutocapitalization(.never)
@@ -226,8 +235,11 @@ struct ContentView: View {
                                 .multilineTextAlignment(.trailing)
                                 .frame(maxWidth: 140)
                         }
-                        settingRow("上传门槛", value: scanner.uploadMinSpeed <= 0 ? "不设门槛" : "\(Int(scanner.uploadMinSpeed)) MB/s") {
-                            Slider(value: $scanner.uploadMinSpeed, in: 0...50, step: 1)
+                        numberRow("上传门槛", value: $scanner.uploadMinSpeed, range: 0...50, unit: "MB/s")
+                        if scanner.uploadMinSpeed <= 0 {
+                            Text("门槛为 0：自动上传不设门槛。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         Toggle("测完自动上传", isOn: $scanner.autoUpload)
                         Button("验证令牌") {
@@ -250,11 +262,6 @@ struct ContentView: View {
                     }
                 }
 
-                Section {
-                    Text("延迟测速是 TCPing（443 端口），和 CFST 默认模式一致；落点探测连候选 IP 查 speed.cloudflare.com 的 trace。下载测速连到候选 IP、以测速接口的域名做 SNI/Host 拉文件计速（接口在参数里可选）。地区选择按实测落点过滤：CF 是 anycast，IP 没有固定归属地，App 会逐个连接确认每个 IP 实际落到哪个机房，只保留目标地区的再做下载测速。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
             }
             .navigationTitle("CF 优选测速")
             .toolbar {
@@ -339,16 +346,26 @@ struct ContentView: View {
         importNote = "剪贴板里没找到可导入的文本或文件。在「文件」App 里长按文件选「拷贝」，或打开文件全选拷贝内容，再回来点粘贴导入；也可以用「手动输入 / 粘贴文本」。"
     }
 
-    private func settingRow<Control: View>(_ title: String, value: String, @ViewBuilder control: () -> Control) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(value)
+    /// 数字参数行：名称 + 数字输入框（预填当前值）+ 单位 + 范围小字；输入越界自动收回边界
+    private func numberRow(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, unit: String = "") -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+            Spacer()
+            TextField("", value: value, format: .number.precision(.fractionLength(0)))
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 60)
+                .onChange(of: value.wrappedValue) { newValue in
+                    let clamped = min(max(newValue, range.lowerBound), range.upperBound)
+                    if clamped != newValue { value.wrappedValue = clamped }
+                }
+            if !unit.isEmpty {
+                Text(unit)
                     .foregroundStyle(.secondary)
-                    .font(.callout)
             }
-            control()
+            Text("\(Int(range.lowerBound))–\(Int(range.upperBound))")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 }

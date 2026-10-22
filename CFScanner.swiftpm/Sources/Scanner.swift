@@ -4,7 +4,7 @@ import UIKit
 /// 目标地区：按连接实测的落点（机房/国家）过滤，不是按 IP 归属——
 /// CF 是 anycast，同一个 IP 在不同网络、不同时间可能落到不同机房，只能现测现筛。
 enum RegionPreference: String, CaseIterable, Identifiable {
-    case carrier, local, any, hongKong, taiwan, singapore, japan, korea, usWest, usEast, europe
+    case carrier, local, any, hongKong, singapore, japan, usWest
 
     var id: String { rawValue }
 
@@ -14,13 +14,9 @@ enum RegionPreference: String, CaseIterable, Identifiable {
         case .local: return "本地（自动探测）"
         case .any: return "不限"
         case .hongKong: return "香港"
-        case .taiwan: return "台湾"
         case .singapore: return "新加坡"
         case .japan: return "日本"
-        case .korea: return "韩国"
         case .usWest: return "美国西部"
-        case .usEast: return "美国东部"
-        case .europe: return "欧洲"
         }
     }
 
@@ -28,11 +24,8 @@ enum RegionPreference: String, CaseIterable, Identifiable {
     var countries: Set<String>? {
         switch self {
         case .hongKong: return ["HK"]
-        case .taiwan: return ["TW"]
         case .singapore: return ["SG"]
         case .japan: return ["JP"]
-        case .korea: return ["KR"]
-        case .europe: return ["GB", "DE", "FR", "NL", "ES", "IT", "SE", "CH", "AT", "PL", "BE", "DK", "NO", "FI", "IE", "PT", "CZ"]
         default: return nil
         }
     }
@@ -41,7 +34,6 @@ enum RegionPreference: String, CaseIterable, Identifiable {
     var colos: Set<String>? {
         switch self {
         case .usWest: return ["LAX", "SJC", "SFO", "SEA", "PDX", "SLC", "DEN", "PHX", "LAS", "SAN"]
-        case .usEast: return ["IAD", "EWR", "JFK", "LGA", "BOS", "ORD", "DFW", "IAH", "ATL", "MIA", "CLT", "DTW", "MSP", "BNA", "STL", "CMH", "IND"]
         default: return nil
         }
     }
@@ -104,7 +96,7 @@ enum DownloadSource: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .parallels: return "Parallels（exe 同款）"
+        case .parallels: return "Parallels"
         case .cloudflare: return "Cloudflare 官方"
         case .custom: return "自定义地址"
         }
@@ -147,7 +139,7 @@ final class Scanner: ObservableObject {
     @Published var candidateTarget: Double = 800   //      候选 IP 总数（手机上别太贪）
     @Published var doDownload: Bool = true         // -dd  的反面：是否做下载测速
     @Published var downloadCount: Double = 15      // -dn  下载测速数量
-    @Published var downloadSeconds: Double = 8     // -dt  单个 IP 下载测速时长
+    @Published var downloadSeconds: Double = 10    // -dt  单个 IP 下载测速时长
     @Published var downloadSource: DownloadSource = .parallels {   // 下载测速接口（默认 exe 同款）
         didSet { UserDefaults.standard.set(downloadSource.rawValue, forKey: Self.downloadSourceKey) }
     }
@@ -181,7 +173,7 @@ final class Scanner: ObservableObject {
     @Published var uploadEnabled: Bool = false {
         didSet { UserDefaults.standard.set(uploadEnabled, forKey: Self.uploadEnabledKey) }
     }
-    @Published var uploadAPIURL: String = "https://api.8888345.xyz/api/client/uploadResult" {
+    @Published var uploadAPIURL: String = "" {   // 不预置任何地址，用户填自己的中转
         didSet { UserDefaults.standard.set(uploadAPIURL, forKey: Self.uploadAPIKey) }
     }
     @Published var uploadToken: String = "" {
@@ -198,6 +190,7 @@ final class Scanner: ObservableObject {
     }
     private static let uploadEnabledKey = "cfscanner.uploadEnabled"
     private static let uploadAPIKey = "cfscanner.uploadAPIURL"
+    private static let uploadURLClearedKey = "cfscanner.uploadURLClearedV1"
     private static let uploadTokenKey = "cfscanner.uploadToken"
     private static let uploadRegionKey = "cfscanner.uploadRegion"
     private static let uploadMinSpeedKey = "cfscanner.uploadMinSpeed"
@@ -244,7 +237,14 @@ final class Scanner: ObservableObject {
             carrierChoice = c
         }
         uploadEnabled = defaults.bool(forKey: Self.uploadEnabledKey)
-        if let u = defaults.string(forKey: Self.uploadAPIKey), !u.isEmpty { uploadAPIURL = u }
+        // 一次性清理：老版本预置的中转地址不再写死；存量里若还是那个预置值就清掉，用户自己填过的地址保留
+        if !defaults.bool(forKey: Self.uploadURLClearedKey) {
+            if defaults.string(forKey: Self.uploadAPIKey) == "https://api.8888345.xyz/api/client/uploadResult" {
+                defaults.removeObject(forKey: Self.uploadAPIKey)
+            }
+            defaults.set(true, forKey: Self.uploadURLClearedKey)
+        }
+        uploadAPIURL = defaults.string(forKey: Self.uploadAPIKey) ?? ""
         uploadToken = defaults.string(forKey: Self.uploadTokenKey) ?? ""
         if let r = defaults.string(forKey: Self.uploadRegionKey), !r.isEmpty { uploadRegion = r }
         if defaults.object(forKey: Self.uploadMinSpeedKey) != nil {
@@ -666,6 +666,10 @@ final class Scanner: ObservableObject {
             uploadStatus = "上传失败：地区不能为空（要和面板里 broker 地区一致）"
             return
         }
+        guard !uploadAPIURL.trimmingCharacters(in: .whitespaces).isEmpty else {
+            uploadStatus = "上传失败：请先在「结果上传」里填接口地址"
+            return
+        }
         // 候选：有下载成绩的按速度降序；自动上传要过门槛取前 10，手动上传不限门槛取前 5
         let bySpeed = results
             .filter { ($0.downloadMBps ?? 0) > 0 }
@@ -766,6 +770,10 @@ final class Scanner: ObservableObject {
         let token = uploadToken.trimmingCharacters(in: .whitespaces)
         guard !token.isEmpty else {
             uploadStatus = "请先填上传令牌"
+            return
+        }
+        guard !uploadAPIURL.trimmingCharacters(in: .whitespaces).isEmpty else {
+            uploadStatus = "请先填接口地址"
             return
         }
         guard !isUploading else { return }
