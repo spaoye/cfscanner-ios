@@ -69,6 +69,27 @@ struct ContentView: View {
                             copiedIP = r.ip
                         }
                     }
+                    if scanner.uploadEnabled && !scanner.results.isEmpty {
+                        Button {
+                            Task { await scanner.uploadResults() }
+                        } label: {
+                            HStack {
+                                Spacer()
+                                if scanner.isUploading {
+                                    ProgressView()
+                                } else {
+                                    Text("上传结果到中转")
+                                }
+                                Spacer()
+                            }
+                        }
+                        .disabled(scanner.isUploading || scanner.isRunning)
+                        if !scanner.uploadStatus.isEmpty {
+                            Text(scanner.uploadStatus)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 Section("自选 IP 列表") {
@@ -137,6 +158,46 @@ struct ContentView: View {
                         settingRow("单个下载时长", value: "\(Int(scanner.downloadSeconds)) 秒") {
                             Slider(value: $scanner.downloadSeconds, in: 3...15, step: 1)
                         }
+                    }
+                }
+
+                Section("结果上传") {
+                    Toggle("启用结果上传", isOn: $scanner.uploadEnabled)
+                    if scanner.uploadEnabled {
+                        TextField("接口地址", text: $scanner.uploadAPIURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(.footnote, design: .monospaced))
+                        SecureField("上传令牌", text: $scanner.uploadToken)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        HStack {
+                            Text("地区")
+                            Spacer()
+                            TextField("地区", text: $scanner.uploadRegion)
+                                .multilineTextAlignment(.trailing)
+                                .frame(maxWidth: 140)
+                        }
+                        settingRow("上传门槛", value: scanner.uploadMinSpeed <= 0 ? "不设门槛" : "\(Int(scanner.uploadMinSpeed)) MB/s") {
+                            Slider(value: $scanner.uploadMinSpeed, in: 0...50, step: 1)
+                        }
+                        Toggle("测完自动上传", isOn: $scanner.autoUpload)
+                        Button("验证令牌") {
+                            Task { await scanner.verifyUploadToken() }
+                        }
+                        .disabled(scanner.isUploading)
+                        if !scanner.uploadStatus.isEmpty {
+                            Text(scanner.uploadStatus)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("开启后，测速结果里达标的前 10 名（IP、速度、延迟、丢包、落点）会按地区 + 运营商上传到中转，供 Emby 面板的自动优选拉取使用。地区要和面板里 broker 的地区填一致；运营商用测速时识别/选择的那家。令牌与电脑端工具里填的是同一个，只保存在本机。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("关闭时本 App 就是普通的优选测速工具，不会向任何服务器上传数据。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 

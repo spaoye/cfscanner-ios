@@ -67,6 +67,15 @@ enum Carrier: String, CaseIterable, Identifiable {
         }
     }
 
+    /// 上传协议里的运营商短名（中转按 地区+运营商 分池，必须是这三个词）
+    var shortLabel: String {
+        switch self {
+        case .telecom: return "电信"
+        case .unicom: return "联通"
+        case .mobile: return "移动"
+        }
+    }
+
     /// 该运营商的优先机房代码集合
     var colos: Set<String> {
         switch self {
@@ -95,6 +104,8 @@ struct ScanResult: Identifiable {
     var colo: String?
     var country: String? = nil
     var note: String? = nil
+    /// 历轮下载测速的原始成绩（第一轮 + 决赛复测），算上传用的可信度/稳定性
+    var speedSamples: [Double] = []
     var lossRate: Double { sent > 0 ? Double(sent - received) / Double(sent) : 1 }
 }
 
@@ -120,6 +131,39 @@ final class Scanner: ObservableObject {
     @Published var doDownload: Bool = true         // -dd  的反面：是否做下载测速
     @Published var downloadCount: Double = 15      // -dn  下载测速数量
     @Published var downloadSeconds: Double = 8     // -dt  单个 IP 下载测速时长
+
+    // MARK: 结果上传设置（总开关默认关；关时就是普通优选 App，不发出任何上传请求）
+    @Published var uploadEnabled: Bool = false {
+        didSet { UserDefaults.standard.set(uploadEnabled, forKey: Self.uploadEnabledKey) }
+    }
+    @Published var uploadAPIURL: String = "https://api.8888345.xyz/api/client/uploadResult" {
+        didSet { UserDefaults.standard.set(uploadAPIURL, forKey: Self.uploadAPIKey) }
+    }
+    @Published var uploadToken: String = "" {
+        didSet { UserDefaults.standard.set(uploadToken, forKey: Self.uploadTokenKey) }
+    }
+    @Published var uploadRegion: String = "北京" {
+        didSet { UserDefaults.standard.set(uploadRegion, forKey: Self.uploadRegionKey) }
+    }
+    @Published var uploadMinSpeed: Double = 10 {   // 上传门槛 MB/s（0 = 不设门槛）
+        didSet { UserDefaults.standard.set(uploadMinSpeed, forKey: Self.uploadMinSpeedKey) }
+    }
+    @Published var autoUpload: Bool = false {       // 测完自动上传（仅总开关打开时生效）
+        didSet { UserDefaults.standard.set(autoUpload, forKey: Self.autoUploadKey) }
+    }
+    private static let uploadEnabledKey = "cfscanner.uploadEnabled"
+    private static let uploadAPIKey = "cfscanner.uploadAPIURL"
+    private static let uploadTokenKey = "cfscanner.uploadToken"
+    private static let uploadRegionKey = "cfscanner.uploadRegion"
+    private static let uploadMinSpeedKey = "cfscanner.uploadMinSpeed"
+    private static let autoUploadKey = "cfscanner.autoUpload"
+
+    // 上传状态（界面显示；与测速状态分开，免得互相覆盖）
+    @Published private(set) var uploadStatus: String = ""
+    @Published private(set) var isUploading = false
+    /// 最近一轮测速定下的运营商与完成时间（上传时标注 地区/运营商 用）
+    private var lastCarrier: Carrier?
+    private var lastFinishedAt: Date?
 
     // MARK: 状态
     @Published private(set) var results: [ScanResult] = []
@@ -154,6 +198,14 @@ final class Scanner: ObservableObject {
         if let c = defaults.string(forKey: Self.carrierKey) {
             carrierChoice = c
         }
+        uploadEnabled = defaults.bool(forKey: Self.uploadEnabledKey)
+        if let u = defaults.string(forKey: Self.uploadAPIKey), !u.isEmpty { uploadAPIURL = u }
+        uploadToken = defaults.string(forKey: Self.uploadTokenKey) ?? ""
+        if let r = defaults.string(forKey: Self.uploadRegionKey), !r.isEmpty { uploadRegion = r }
+        if defaults.object(forKey: Self.uploadMinSpeedKey) != nil {
+            uploadMinSpeed = defaults.double(forKey: Self.uploadMinSpeedKey)
+        }
+        autoUpload = defaults.bool(forKey: Self.autoUploadKey)
         if let text = UserDefaults.standard.string(forKey: Self.customTextKey),
            let name = UserDefaults.standard.string(forKey: Self.customNameKey) {
             let ips = IPRanges.parseCustomList(text)
@@ -240,6 +292,7 @@ final class Scanner: ObservableObject {
             } else {
                 statusText = "运营商识别失败，已改用自动探测主落点（也可以在参数里手动选运营商）"
             }
+            lastCarrier = activeCarrier
         }
 
         let candidates: [String]
@@ -450,6 +503,7 @@ final class Scanner: ObservableObject {
                     NetTest.downloadTest(ip: ip, testHost: host, seconds: dlSeconds)
                 }.value
                 filtered[i].downloadMBps = outcome.mbps
+                filtered[i].speedSamples = [outcome.mbps]
                 filtered[i].colo = outcome.colo
                 filtered[i].note = outcome.note
                 results = Self.displaySorted(filtered)
@@ -476,6 +530,7 @@ final class Scanner: ObservableObject {
                         filtered[i].colo = outcome.colo
                         filtered[i].note = outcome.note
                     }
+                    filtered[i].speedSamples.append(outcome.mbps)
                     results = Self.displaySorted(filtered)
                 }
             }
@@ -490,6 +545,12 @@ final class Scanner: ObservableObject {
         results = filtered
         progress = 1
         isRunning = false
+        lastFinishedAt = Date()
+
+        // 测完自动上传：仅当总开关与自动上传都开、且本轮没被手动停止时
+        if uploadEnabled && autoUpload && !cancelled {
+            await uploadResults()
+        }
     }
 
     /// 国家代码转中文名（状态栏显示本地落点时用）
@@ -518,6 +579,129 @@ final class Scanner: ObservableObject {
                 if $0.lossRate != $1.lossRate { return $0.lossRate < $1.lossRate }
                 return $0.avgLatencyMs < $1.avgLatencyMs
             }
+        }
+    }
+
+    // MARK: 结果上传（总开关关闭时以下方法不会被调用）
+
+    /// 把本轮结果按 exe 3.0 协议上传到中转：只传达标（≥ 门槛）的前 10 名。
+    func uploadResults() async {
+        guard uploadEnabled else { return }
+        guard !isUploading else { return }
+        let token = uploadToken.trimmingCharacters(in: .whitespaces)
+        guard !token.isEmpty else {
+            uploadStatus = "上传失败：请先在「结果上传」里填上传令牌"
+            return
+        }
+        let regionText = uploadRegion.trimmingCharacters(in: .whitespaces)
+        guard !regionText.isEmpty else {
+            uploadStatus = "上传失败：地区不能为空（要和面板里 broker 地区一致）"
+            return
+        }
+        // 候选：有下载成绩、达到门槛、按速度降序，最多 10 条
+        let minSpeed = uploadMinSpeed
+        let eligible = results
+            .filter { ($0.downloadMBps ?? 0) >= max(minSpeed, 0.01) }
+            .sorted { ($0.downloadMBps ?? 0) > ($1.downloadMBps ?? 0) }
+        let items = Array(eligible.prefix(10))
+        guard !items.isEmpty else {
+            uploadStatus = "没有达到 \(Int(minSpeed)) MB/s 门槛的结果，未上传（共 \(results.count) 条结果）"
+            return
+        }
+        // 运营商：优先用本轮测速定下的，其次参数里的手动选择，最后现场识别一次
+        var carrier = lastCarrier ?? Carrier(rawValue: carrierChoice)
+        if carrier == nil {
+            carrier = await NetTest.detectCarrier()
+        }
+        guard let isp = carrier else {
+            uploadStatus = "上传失败：无法确定运营商（在参数里手动选一次运营商再测，或检查网络）"
+            return
+        }
+
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let testedAt = fmt.string(from: lastFinishedAt ?? Date())
+        let coloSet = Array(Set(items.compactMap { $0.colo })).sorted().joined(separator: ",")
+
+        let bodyItems: [[String: Any]] = items.map { r in
+            let speed = r.downloadMBps ?? 0
+            // 可信度：复测过的看两轮接近程度（越接近越可信）；只测一轮的给中间值
+            let trust: Double
+            let notes: String
+            if r.speedSamples.count >= 2, let a = r.speedSamples.first, let b = r.speedSamples.last {
+                let hi = max(a, b)
+                let spread = hi > 0 ? (hi - min(a, b)) / hi : 0
+                trust = min(1, max(0, 1 - spread))
+                notes = spread <= 0.1 ? "两轮测速稳定" : spread <= 0.25 ? "两轮测速基本稳定" : "两轮测速波动较大"
+            } else {
+                trust = 0.5
+                notes = "单轮测速"
+            }
+            let score = (speed * trust * (1 - r.lossRate) * 100).rounded() / 100
+            return [
+                "ip": r.ip,
+                "sent": r.sent,
+                "recv": r.received,
+                "loss": (r.lossRate * 10000).rounded() / 10000,
+                "latency": (r.avgLatencyMs * 100).rounded() / 100,
+                "speed": (speed * 100).rounded() / 100,
+                "colo": r.colo ?? "",
+                "score": score,
+                "trust": (trust * 100).rounded() / 100,
+                "reliability_notes": notes,
+                "strategy": "cfscanner-ios",
+                "scan_mode": "tcping",
+                "cfcolo": coloSet,
+                "tested_at": testedAt
+            ]
+        }
+        let body: [String: Any] = [
+            "client_version": "3.0",
+            "type": "v4",
+            "region": regionText,
+            "isp": isp.shortLabel,
+            "items": bodyItems
+        ]
+
+        isUploading = true
+        uploadStatus = "正在上传 \(items.count) 条（\(regionText) / \(isp.shortLabel)）…"
+        let outcome = await Uploader.upload(
+            apiURL: uploadAPIURL.trimmingCharacters(in: .whitespaces),
+            token: token,
+            body: body
+        )
+        isUploading = false
+        switch outcome {
+        case .success(let saved):
+            uploadStatus = saved >= 0
+                ? "上传完成：中转已确认保存 \(saved) 条（\(regionText) / \(isp.shortLabel)）"
+                : "上传完成：已提交 \(items.count) 条（\(regionText) / \(isp.shortLabel)）"
+        case .failure(let message):
+            uploadStatus = "上传失败：\(message)"
+        }
+    }
+
+    /// 验证上传令牌（设置时用）：成功会显示中转登记的客户端名
+    func verifyUploadToken() async {
+        let token = uploadToken.trimmingCharacters(in: .whitespaces)
+        guard !token.isEmpty else {
+            uploadStatus = "请先填上传令牌"
+            return
+        }
+        guard !isUploading else { return }
+        isUploading = true
+        uploadStatus = "正在验证令牌…"
+        let outcome = await Uploader.verifyToken(
+            apiURL: uploadAPIURL.trimmingCharacters(in: .whitespaces),
+            token: token
+        )
+        isUploading = false
+        switch outcome {
+        case .success(let name):
+            uploadStatus = name.isEmpty ? "令牌验证通过" : "令牌验证通过：\(name)"
+        case .failure(let message):
+            uploadStatus = message
         }
     }
 
