@@ -5,6 +5,11 @@ import Foundation
 /// 本文件只负责 HTTP 与协议；开关关闭时 App 不会调用这里的任何方法。
 enum Uploader {
 
+    /// 上传失败原因（Result 的 Failure 类型必须是 Error，String 不行）
+    struct UploadError: Error {
+        let message: String
+    }
+
     struct HTTPResult {
         let status: Int
         let json: [String: Any]?
@@ -31,7 +36,7 @@ enum Uploader {
     }
 
     /// 上传结果：最多 3 次尝试、间隔 2 秒（与 exe 一致）。成功返回中转确认保存的条数。
-    static func upload(apiURL: String, token: String, body: [String: Any]) async -> Result<Int, String> {
+    static func upload(apiURL: String, token: String, body: [String: Any]) async -> Result<Int, UploadError> {
         var lastError = "未知错误"
         for attempt in 1...3 {
             do {
@@ -57,11 +62,11 @@ enum Uploader {
                 if attempt < 3 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
             }
         }
-        return .failure(lastError)
+        return .failure(UploadError(message: lastError))
     }
 
     /// 验证令牌：上传地址路径换成 verifyUploadToken，成功返回中转登记的客户端名。
-    static func verifyToken(apiURL: String, token: String) async -> Result<String, String> {
+    static func verifyToken(apiURL: String, token: String) async -> Result<String, UploadError> {
         let verifyURL: String
         if apiURL.contains("uploadResult") {
             verifyURL = apiURL.replacingOccurrences(of: "uploadResult", with: "verifyUploadToken")
@@ -71,16 +76,16 @@ enum Uploader {
         do {
             let r = try await postJSON(urlString: verifyURL, headers: headers(token: token), body: ["type": "v4"])
             guard r.status == 200, let json = r.json else {
-                return .failure("验证失败：HTTP \(r.status)")
+                return .failure(UploadError(message: "验证失败：HTTP \(r.status)"))
             }
             if (json["ok"] as? Bool) == true {
                 let client = json["client"] as? [String: Any]
                 let name = (client?["name"] as? String) ?? ""
                 return .success(name)
             }
-            return .failure("验证失败：\((json["error"] as? String) ?? "令牌不被接受")")
+            return .failure(UploadError(message: "验证失败：\((json["error"] as? String) ?? "令牌不被接受")"))
         } catch {
-            return .failure("无法连接验证接口：\(error.localizedDescription)")
+            return .failure(UploadError(message: "无法连接验证接口：\(error.localizedDescription)"))
         }
     }
 }

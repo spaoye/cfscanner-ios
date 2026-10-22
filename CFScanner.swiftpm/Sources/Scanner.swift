@@ -677,8 +677,8 @@ final class Scanner: ObservableObject {
             uploadStatus = saved >= 0
                 ? "上传完成：中转已确认保存 \(saved) 条（\(regionText) / \(isp.shortLabel)）"
                 : "上传完成：已提交 \(items.count) 条（\(regionText) / \(isp.shortLabel)）"
-        case .failure(let message):
-            uploadStatus = "上传失败：\(message)"
+        case .failure(let err):
+            uploadStatus = "上传失败：\(err.message)"
         }
     }
 
@@ -700,8 +700,8 @@ final class Scanner: ObservableObject {
         switch outcome {
         case .success(let name):
             uploadStatus = name.isEmpty ? "令牌验证通过" : "令牌验证通过：\(name)"
-        case .failure(let message):
-            uploadStatus = message
+        case .failure(let err):
+            uploadStatus = err.message
         }
     }
 
