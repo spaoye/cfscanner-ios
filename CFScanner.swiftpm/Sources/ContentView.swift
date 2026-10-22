@@ -6,6 +6,7 @@ struct ContentView: View {
     @StateObject private var scanner = Scanner()
     @State private var copiedIP: String?
     @State private var showImporter = false
+    @State private var importNote: String?
 
     var body: some View {
         NavigationStack {
@@ -108,8 +109,28 @@ struct ContentView: View {
                             }
                         }
                         Button("重新导入") { showImporter = true }
+
+                        Button("粘贴导入（从剪贴板）") {
+                            if let clip = UIPasteboard.general.string,
+                               !clip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                scanner.importCustomList(text: clip, name: "剪贴板导入.txt")
+                                importNote = scanner.statusText
+                            } else {
+                                importNote = "剪贴板里没有文本。先把 IP 列表复制下来（一行一个 IP），再点粘贴导入。"
+                            }
+                        }
                     } else {
                         Button("导入 IP 文件（CSV / TXT）") { showImporter = true }
+
+                        Button("粘贴导入（从剪贴板）") {
+                            if let clip = UIPasteboard.general.string,
+                               !clip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                scanner.importCustomList(text: clip, name: "剪贴板导入.txt")
+                                importNote = scanner.statusText
+                            } else {
+                                importNote = "剪贴板里没有文本。先把 IP 列表复制下来（一行一个 IP），再点粘贴导入。"
+                            }
+                        }
                         Text("每行一个 IP 或网段（如 104.16.0.0/24），CSV 取第一列；CFST 的 ip.txt 和 result.csv 可直接导入。不导入时从 Cloudflare 官方 IP 段随机抽样。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -223,15 +244,6 @@ struct ContentView: View {
                     }
                 }
             }
-            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.plainText, .commaSeparatedText, .text, .data], allowsMultipleSelection: false) { result in
-                guard case .success(let urls) = result, let url = urls.first else { return }
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                if let data = try? Data(contentsOf: url),
-                   let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) {
-                    scanner.importCustomList(text: text, name: url.lastPathComponent)
-                }
-            }
             .alert("已复制", isPresented: Binding(
                 get: { copiedIP != nil },
                 set: { if !$0 { copiedIP = nil } }
@@ -240,6 +252,34 @@ struct ContentView: View {
             } message: {
                 Text(copiedIP ?? "")
             }
+        }
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.plainText, .commaSeparatedText, .text, .data], allowsMultipleSelection: false) { result in
+            switch result {
+            case .failure(let err):
+                importNote = "文件选择失败：\(err.localizedDescription)"
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+                    importNote = "读不到这个文件的内容（可能还在 iCloud 里没下载完）。先在「文件」App 里点它一下下载到本机，再回来导入；或者用粘贴导入。"
+                    return
+                }
+                if let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) ?? String(data: data, encoding: .isoLatin1) {
+                    scanner.importCustomList(text: text, name: url.lastPathComponent)
+                    importNote = scanner.statusText
+                } else {
+                    importNote = "这个文件不是文本内容，无法导入。请选择一行一个 IP 的 .txt 或 .csv 文件，或用粘贴导入。"
+                }
+            }
+        }
+        .alert("导入结果", isPresented: Binding(
+            get: { importNote != nil },
+            set: { if !$0 { importNote = nil } }
+        )) {
+            Button("好") { importNote = nil }
+        } message: {
+            Text(importNote ?? "")
         }
     }
 
