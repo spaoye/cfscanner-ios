@@ -81,11 +81,30 @@ enum IPRanges {
             }
             line = line.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             if line.isEmpty { continue }
-            if line.contains("/") {
-                let pair = line.split(separator: "/")
-                guard pair.count == 2,
-                      let base = ipToUInt32(String(pair[0])),
-                      let prefix = Int(pair[1]), (0...32).contains(prefix) else { continue }
+            // 网页导出格式：https://1.2.3.4 、https://域名 —— 先去掉 scheme
+            if let scheme = line.range(of: "://") {
+                line = String(line[scheme.upperBound...])
+            }
+            // 斜杠：先按网段判定（主机是 IP 且斜杠后是 0-32 的纯数字），否则当 URL 路径丢弃
+            var cidrPrefix: Int? = nil
+            if let slash = line.firstIndex(of: "/") {
+                let before = String(line[..<slash])
+                let after = String(line[line.index(after: slash)...])
+                if ipToUInt32(before) != nil, let pfx = Int(after), (0...32).contains(pfx) {
+                    cidrPrefix = pfx
+                }
+                line = before
+            }
+            // 端口：45.207.158.200:443 、1.2.3.4:8443 —— 冒号后是纯数字就去掉
+            if let colon = line.lastIndex(of: ":") {
+                let host = String(line[..<colon])
+                let port = String(line[line.index(after: colon)...])
+                if !port.isEmpty, port.allSatisfy({ $0.isNumber }) {
+                    line = host
+                }
+            }
+            if let prefix = cidrPrefix {
+                guard let base = ipToUInt32(line) else { continue }
                 let hostBits = 32 - prefix
                 let total = UInt64(1) << UInt64(hostBits)   // hostBits 最大 32，UInt64 装得下
                 let mask: UInt32 = prefix == 0 ? 0 : UInt32.max << UInt32(32 - prefix)
@@ -100,6 +119,7 @@ enum IPRanges {
             } else if ipToUInt32(line) != nil {
                 add(line)
             }
+            // 其余（纯域名等）跳过：域名不是 IP，测速用不上
         }
         return result
     }

@@ -131,7 +131,12 @@ struct ContentView: View {
                                 importNote = "剪贴板里没有文本。先把 IP 列表复制下来（一行一个 IP），再点粘贴导入。"
                             }
                         }
-                        Text("每行一个 IP 或网段（如 104.16.0.0/24），CSV 取第一列；CFST 的 ip.txt 和 result.csv 可直接导入。不导入时从 Cloudflare 官方 IP 段随机抽样。")
+                        Text("每行一个 IP 或网段（如 104.16.0.0/24），CSV 取第一列；CFST 的 ip.txt 和 result.csv 可直接导入。也支持 https://IP、IP:端口 这类网页导出格式，纯域名的行会跳过。不导入时从 Cloudflare 官方 IP 段随机抽样。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let note = importNote {
+                        Text(note)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

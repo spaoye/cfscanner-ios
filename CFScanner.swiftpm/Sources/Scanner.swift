@@ -222,7 +222,7 @@ final class Scanner: ObservableObject {
     func importCustomList(text: String, name: String) {
         let ips = IPRanges.parseCustomList(text)
         guard !ips.isEmpty else {
-            statusText = "导入失败：\(name) 里没找到有效的 IP 或网段（每行一个 IP，或 104.16.0.0/24 这样的网段，CSV 取第一列）。"
+            statusText = "导入失败：\(name) 里没找到有效的 IP。支持纯 IP、IP:端口、https://IP、104.16.0.0/24 网段；纯域名的行会被跳过。"
             return
         }
         customIPs = ips
