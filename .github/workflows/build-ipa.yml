@@ -39,21 +39,16 @@ jobs:
           cat > "$ICONSET/Contents.json" <<'EOF'
           {
             "images": [
-              { "filename": "icon-light.png", "idiom": "iphone", "scale": "1x", "size": "1024x1024" },
-              { "filename": "icon-dark.png", "idiom": "iphone", "scale": "1x", "size": "1024x1024",
-                "appearances": [{ "appearance": "luminosity", "value": "dark" }] },
-              { "filename": "icon-light.png", "idiom": "ipad", "scale": "1x", "size": "1024x1024" },
-              { "filename": "icon-dark.png", "idiom": "ipad", "scale": "1x", "size": "1024x1024",
+              { "filename": "icon-light.png", "idiom": "universal", "platform": "ios", "size": "1024x1024" },
+              { "filename": "icon-dark.png", "idiom": "universal", "platform": "ios", "size": "1024x1024",
                 "appearances": [{ "appearance": "luminosity", "value": "dark" }] }
             ],
             "info": { "author": "xcode", "version": 1 }
           }
           EOF
-          mkdir -p /tmp/icon-out
-          xcrun actool /tmp/AppIcon.xcassets --compile /tmp/icon-out --platform iphoneos --minimum-deployment-target 16.0 --app-icon AppIcon --output-partial-info-plist /tmp/icon-partial.plist
-          ls -lh /tmp/icon-out
-          cp -R /tmp/icon-out/Assets.car "$APP/"
-          cp /tmp/icon-out/AppIcon*.png "$APP/" 2>/dev/null || true
+          xcrun actool /tmp/AppIcon.xcassets --compile "$APP" --platform iphoneos --target-device iphone --target-device ipad --minimum-deployment-target 16.0 --app-icon AppIcon --output-partial-info-plist /tmp/icon-partial.plist
+          test -f "$APP/Assets.car"
+          ls -lh "$APP/Assets.car"
           /usr/libexec/PlistBuddy -c "Merge /tmp/icon-partial.plist" "$APP/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$APP/Info.plist"
 
