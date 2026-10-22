@@ -8,6 +8,7 @@ struct ScanResult: Identifiable {
     var avgLatencyMs: Double
     var downloadMBps: Double?
     var colo: String?
+    var note: String? = nil
     var lossRate: Double { sent > 0 ? Double(sent - received) / Double(sent) : 1 }
 }
 
@@ -142,6 +143,7 @@ final class Scanner: ObservableObject {
                 }.value
                 filtered[i].downloadMBps = outcome.mbps
                 filtered[i].colo = outcome.colo
+                filtered[i].note = outcome.note
                 results = Self.displaySorted(filtered)
                 progress = 0.8 + 0.2 * Double(i + 1) / Double(queueCount)
             }

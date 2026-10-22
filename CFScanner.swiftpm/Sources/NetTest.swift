@@ -39,8 +39,12 @@ enum NetTest {
     // MARK: - 下载测速：连到指定 IP，但 TLS 的 SNI 和 HTTP 的 Host 都用测速域名，
     // 这样任意一个 CF 的 IP 都能当作 speed.cloudflare.com 的边缘来测速；
     // 地区码从响应头 CF-RAY 的后缀解析（和 CFST 显示地区码的方式一致）。
+    //
+    // 注意：speed.cloudflare.com 的 /__down 接口要求 bytes < 100000000，
+    // 等于或超过 1 亿会直接返回 HTTP 403（v1 就栽在这：请求了 104857600，
+    // 每次只拿到 403 的 1 个字节，测速全是 0）。
 
-    static func downloadTest(ip: String, testHost: String, seconds: TimeInterval) -> (mbps: Double, colo: String?) {
+    static func downloadTest(ip: String, testHost: String, seconds: TimeInterval) -> (mbps: Double, colo: String?, note: String?) {
         DownloadTester(ip: ip, testHost: testHost, seconds: seconds).run()
     }
 }
@@ -67,8 +71,12 @@ private final class DownloadTester {
     private var totalBytes = 0
     private var headerBuffer = Data()
     private var headerDone = false
+    private var statusCode: Int?
     private var colo: String?
     private var startTime: DispatchTime?
+    private var connection: NWConnection?
+    private var semaphore: DispatchSemaphore?
+    private var finalResult: (mbps: Double, colo: String?, note: String?) = (0, nil, nil)
 
     init(ip: String, testHost: String, seconds: TimeInterval) {
         self.ip = ip
@@ -76,9 +84,9 @@ private final class DownloadTester {
         self.seconds = seconds
     }
 
-    func run() -> (mbps: Double, colo: String?) {
+    func run() -> (mbps: Double, colo: String?, note: String?) {
         let sem = DispatchSemaphore(value: 0)
-        var result: (mbps: Double, colo: String?) = (0, nil)
+        semaphore = sem
 
         let tlsOptions = NWProtocolTLS.Options()
         // 关键一步：连接目标是 IP，但 SNI 写测速域名
@@ -91,39 +99,56 @@ private final class DownloadTester {
         }, queue)
 
         let connection = NWConnection(host: NWEndpoint.Host(ip), port: 443, using: NWParameters(tls: tlsOptions))
+        self.connection = connection
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
                 self.startTime = DispatchTime.now()
-                let request = "GET /__down?bytes=104857600 HTTP/1.1\r\nHost: \(self.testHost)\r\nUser-Agent: CFScanner/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+                // bytes=90000000：留了余量，没碰 1 亿的 403 红线
+                let request = "GET /__down?bytes=90000000 HTTP/1.1\r\nHost: \(self.testHost)\r\nUser-Agent: CFScanner/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
                 connection.send(content: Data(request.utf8), completion: .contentProcessed { _ in
                     self.receiveNext(connection)
                 })
-                self.queue.asyncAfter(deadline: .now() + self.seconds) {
-                    connection.cancel()
+                // 到达测速时长就收尾
+                self.queue.asyncAfter(deadline: .now() + self.seconds) { [weak self] in
+                    self?.finish()
                 }
             case .failed, .cancelled:
-                self.finishOnce.run {
-                    let elapsed = self.startTime.map {
-                        Double(DispatchTime.now().uptimeNanoseconds - $0.uptimeNanoseconds) / 1_000_000_000
-                    } ?? 0
-                    let mbps = elapsed > 0.2 ? Double(self.totalBytes) / elapsed / 1_000_000 : 0
-                    result = (mbps, self.colo)
-                    sem.signal()
-                }
+                self.finish()
             default:
                 break
             }
         }
         connection.start(queue: queue)
         _ = sem.wait(timeout: .now() + seconds + 10)
-        return result
+        return finalResult
+    }
+
+    /// 统一收尾：算速度、留诊断信息（HTTP 状态不对或没数据时把原因带出去显示）
+    private func finish() {
+        finishOnce.run {
+            let elapsed = startTime.map {
+                Double(DispatchTime.now().uptimeNanoseconds - $0.uptimeNanoseconds) / 1_000_000_000
+            } ?? 0
+            var note: String? = nil
+            if startTime == nil {
+                note = "连接失败"
+            } else if let code = statusCode, code != 200 {
+                note = "HTTP \(code)"
+            } else if totalBytes == 0 {
+                note = "无数据"
+            }
+            let mbps = (elapsed > 0.05 && note == nil) ? Double(totalBytes) / elapsed / 1_000_000 : 0
+            finalResult = (mbps, colo, note)
+            connection?.cancel()
+            semaphore?.signal()
+        }
     }
 
     private func receiveNext(_ connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, _ in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let data, !data.isEmpty {
                 if !self.headerDone {
@@ -132,17 +157,30 @@ private final class DownloadTester {
                        let end = text.range(of: "\r\n\r\n") {
                         self.headerDone = true
                         let head = String(text[..<end.upperBound])
+                        self.statusCode = Self.parseStatus(head)
                         self.colo = Self.parseColo(head)
                         self.totalBytes += self.headerBuffer.count - head.utf8.count
                     }
                 } else {
                     self.totalBytes += data.count
                 }
-                if !isComplete {
-                    self.receiveNext(connection)
-                }
             }
+            if isComplete || error != nil {
+                // 数据在测速时长内就传完了（快线路）：立刻按实际用时结算，不等满时长
+                self.finish()
+            } else if data != nil {
+                self.receiveNext(connection)
+            }
+            // data==nil 且未结束的情况等定时器收尾，不会挂死
         }
+    }
+
+    /// HTTP/1.1 200 OK -> 200
+    static func parseStatus(_ headers: String) -> Int? {
+        guard let firstLine = headers.split(separator: "\n").first else { return nil }
+        let parts = firstLine.split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        return Int(parts[1])
     }
 
     /// CF-RAY: 8f3a……-LAX -> LAX

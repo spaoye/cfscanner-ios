@@ -54,6 +54,11 @@ struct ContentView: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
+                                if let note = r.note {
+                                    Text(note)
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                }
                             }
                         }
                         .contentShape(Rectangle())
