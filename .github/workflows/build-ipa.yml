@@ -49,8 +49,24 @@ jobs:
           xcrun actool /tmp/AppIcon.xcassets --compile "$APP" --platform iphoneos --target-device iphone --target-device ipad --minimum-deployment-target 16.0 --app-icon AppIcon --output-partial-info-plist /tmp/icon-partial.plist
           test -f "$APP/Assets.car"
           ls -lh "$APP/Assets.car"
-          /usr/libexec/PlistBuddy -c "Merge /tmp/icon-partial.plist" "$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$APP/Info.plist"
+          python3 - "$APP/Info.plist" <<'PYEOF'
+          import plistlib, sys
+          path = sys.argv[1]
+          with open('/tmp/icon-partial.plist', 'rb') as f:
+              partial = plistlib.load(f)
+          with open(path, 'rb') as f:
+              info = plistlib.load(f)
+          for k, v in partial.items():
+              if k.startswith('CFBundle'):
+                  info[k] = v
+          icons = info.setdefault('CFBundleIcons', {})
+          primary = icons.setdefault('CFBundlePrimaryIcon', {})
+          primary.setdefault('CFBundleIconName', 'AppIcon')
+          primary.setdefault('CFBundleIconFiles', ['AppIcon60x60'])
+          with open(path, 'wb') as f:
+              plistlib.dump(info, f)
+          print('CFBundleIcons:', info.get('CFBundleIcons'))
+          PYEOF
 
       - name: Package unsigned IPA
         run: |
